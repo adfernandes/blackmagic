@@ -31,238 +31,446 @@
 
 #include <stdarg.h>
 
-size_t gdb_getpacket(char *const packet, const size_t size)
+typedef enum packet_state {
+	PACKET_IDLE,
+	PACKET_GDB_CAPTURE,
+	PACKET_GDB_ESCAPE,
+	PACKET_GDB_CHECKSUM_UPPER,
+	PACKET_GDB_CHECKSUM_LOWER,
+} packet_state_e;
+
+static bool noackmode = false;
+
+#ifdef EXTERNAL_PACKET_BUFFER
+extern gdb_packet_s *gdb_full_packet_buffer(void);
+#else
+/* This has to be aligned so the remote protocol can re-use it without causing Problems */
+static gdb_packet_s BMD_ALIGN_DEF(8) packet_buffer;
+
+static inline gdb_packet_s *gdb_full_packet_buffer(void)
 {
-	unsigned char csum;
-	char recv_csum[3];
-	size_t offset = 0;
+	return &packet_buffer;
+}
 
-	while (true) {
-		/* Wait for packet start */
-		do {
-			/*
-			 * Spin waiting for a start of packet character - either a gdb
-             * start ('$') or a BMP remote packet start ('!').
-			 */
-			do {
-				/* Smells like bad code */
-				packet[0] = gdb_if_getchar();
-				if (packet[0] == '\x04')
-					return 1;
-			} while (packet[0] != '$' && packet[0] != REMOTE_SOM);
-#if PC_HOSTED == 0
-			if (packet[0] == REMOTE_SOM) {
-				/* This is probably a remote control packet - get and handle it */
-				offset = 0;
-				bool getting_remote_packet = true;
-				while (getting_remote_packet) {
-					/* Smells like bad code */
-					const char c = gdb_if_getchar();
-					switch (c) {
-					case REMOTE_SOM: /* Oh dear, packet restarts */
-						offset = 0;
-						break;
+char *gdb_packet_buffer(void)
+{
+	/* Return the static packet data buffer */
+	return packet_buffer.data;
+}
+#endif /* EXTERNAL_PACKET_BUFFER */
 
-					case REMOTE_EOM: /* Complete packet for processing */
-						packet[offset] = 0;
-						remote_packet_process(offset, packet);
-						getting_remote_packet = false;
-						break;
+/* https://sourceware.org/gdb/onlinedocs/gdb/Packet-Acknowledgment.html */
+void gdb_set_noackmode(bool enable)
+{
+	/*
+	 * If we were asked to disable NoAckMode, and it was previously enabled,
+	 * it might mean we got a packet we determined to be the first of a new
+	 * GDB session, and as such it was not acknowledged (before GDB enabled NoAckMode),
+	 * better late than never.
+	 *
+	 * If we were asked after the connection was terminated, sending the ack will have no effect.
+	 */
+	if (!enable && noackmode)
+		gdb_if_putchar(GDB_PACKET_ACK, true);
 
-					case '$': /* A 'real' gdb packet, best stop squatting now */
-						packet[0] = '$';
-						getting_remote_packet = false;
-						break;
+	/* Log only changes */
+	if (noackmode != enable)
+		DEBUG_GDB("%s NoAckMode\n", enable ? "Enabling" : "Disabling");
 
-					default:
-						if (offset < size)
-							packet[offset++] = c;
-						else
-							/* Who knows what is going on...return to normality */
-							getting_remote_packet = false;
-						break;
-					}
-				}
-				/*
-				 * Reset the packet buffer start character to zero, because function
-				 * 'remote_packet_process()' above overwrites this buffer, and
-				 * an arbitrary character may have been placed there. If this is a '$'
-				 * character, this will cause this loop to be terminated, which is wrong.
-				 */
-				packet[0] = '\0';
-			}
+	noackmode = enable;
+}
+
+#ifndef DEBUG_GDB_IS_NOOP
+static void gdb_packet_debug(const char *const func, const gdb_packet_s *const packet)
+{
+	/* Log packet for debugging */
+	DEBUG_GDB("%s: ", func);
+	for (size_t i = 0; i < packet->size; i++) {
+		const char value = packet->data[i];
+		if (value >= ' ' && value < '\x7f')
+			DEBUG_GDB("%c", value);
+		else
+			DEBUG_GDB("\\x%02X", (uint8_t)value);
+	}
+	DEBUG_GDB("\n");
+}
 #endif
-		} while (packet[0] != '$');
 
-		offset = 0;
-		csum = 0;
-		char c = '\0';
-		/* Capture packet data into buffer */
-		while (c != '#') {
-			c = gdb_if_getchar();
-			if (c == '#')
-				break;
-			/* If we run out of buffer space, exit early */
-			if (offset == size)
-				break;
+static inline bool gdb_packet_is_reserved(const char character)
+{
+	/* Check if the character is a reserved GDB packet character */
+	return character == GDB_PACKET_START || character == GDB_PACKET_END || character == GDB_PACKET_ESCAPE ||
+		character == GDB_PACKET_RUNLENGTH_START;
+}
 
-			if (c == '$') { /* Restart capture */
-				offset = 0;
-				csum = 0;
-				continue;
-			}
-			if (c == '}') { /* Escaped char */
-				c = gdb_if_getchar();
-				csum += c + '}';
-				packet[offset++] = c ^ 0x20U;
-				continue;
-			}
-			csum += c;
-			packet[offset++] = c;
-		}
-		recv_csum[0] = gdb_if_getchar();
-		recv_csum[1] = gdb_if_getchar();
-		recv_csum[2] = 0;
+static uint8_t gdb_packet_checksum(const gdb_packet_s *const packet)
+{
+	/* Calculate the checksum of the packet */
+	uint8_t checksum = 0;
+	for (size_t i = 0; i < packet->size; i++) {
+		const char character = packet->data[i];
+		if (gdb_packet_is_reserved(character))
+			checksum += GDB_PACKET_ESCAPE + (character ^ GDB_PACKET_ESCAPE_XOR);
+		else
+			checksum += character;
+	}
+	return checksum;
+}
 
-		/* Return packet if checksum matches */
-		if (csum == strtol(recv_csum, NULL, 16))
+packet_state_e consume_remote_packet(char *const packet, const size_t size)
+{
+#if CONFIG_BMDA == 0
+	/* We got what looks like probably a remote control packet */
+	size_t offset = 0;
+	while (true) {
+		/* Consume bytes until we either have a complete remote control packet or have to leave this mode */
+		const char rx_char = gdb_if_getchar();
+
+		switch (rx_char) {
+		case '\x04':
+			packet[0] = rx_char;
+			/* EOT (end of transmission) - connection was closed */
+			return PACKET_IDLE;
+
+		case REMOTE_SOM:
+			/* Oh dear, restart remote packet capture */
+			offset = 0;
 			break;
 
-		/* Get here if checksum fails */
-		gdb_if_putchar('-', 1); /* Send nack */
-	}
-	gdb_if_putchar('+', 1); /* Send ack */
-	packet[offset] = '\0';
+		case REMOTE_EOM:
+			/* Complete packet for processing */
 
-#if PC_HOSTED == 1
-	DEBUG_GDB_WIRE("%s : ", __func__);
-	for (size_t j = 0; j < offset; j++) {
-		const char c = packet[j];
-		if (c >= ' ' && c < '\x7f')
-			DEBUG_GDB_WIRE("%c", c);
-		else
-			DEBUG_GDB_WIRE("\\x%02X", c);
+			/* Null terminate packet */
+			packet[offset] = '\0';
+			/* Handle packet */
+			remote_packet_process(packet, offset);
+
+			/* Restart packet capture */
+			packet[0] = '\0';
+			return PACKET_IDLE;
+
+		case GDB_PACKET_START:
+			/* A 'real' gdb packet, best stop squatting now */
+			return PACKET_GDB_CAPTURE;
+
+		default:
+			if (offset < size)
+				packet[offset++] = rx_char;
+			else {
+				packet[0] = '\0';
+				/* Buffer overflow, restart packet capture */
+				return PACKET_IDLE;
+			}
+		}
 	}
-	DEBUG_GDB_WIRE("\n");
+#else
+	(void)packet;
+	(void)size;
+
+	/* Hosted builds ignore remote control packets */
+	return PACKET_IDLE;
 #endif
-	return offset;
 }
 
-static void gdb_next_char(const char c, uint8_t *const csum)
+gdb_packet_s *gdb_packet_receive(void)
 {
-#if PC_HOSTED == 1
-	if (c >= 32 && c < 127)
-		DEBUG_GDB_WIRE("%c", c);
-	else
-		DEBUG_GDB_WIRE("\\x%02X", c);
+	packet_state_e state = PACKET_IDLE; /* State of the packet capture */
+	uint8_t rx_checksum = 0;
+	gdb_packet_s *packet = gdb_full_packet_buffer();
+
+	while (true) {
+		const char rx_char = gdb_if_getchar();
+
+		switch (state) {
+		case PACKET_IDLE:
+			packet->data[0U] = rx_char;
+			if (rx_char == GDB_PACKET_START) {
+				/* Start of GDB packet */
+				state = PACKET_GDB_CAPTURE;
+				packet->size = 0;
+				packet->notification = false;
+			}
+#if CONFIG_BMDA == 0
+			else if (rx_char == REMOTE_SOM) {
+				/* Start of BMP remote packet */
+				/*
+				 * Let consume_remote_packet handle this
+				 * returns PACKET_IDLE or PACKET_GDB_CAPTURE if it detects the start of a GDB packet
+				 */
+				state = consume_remote_packet(packet->data, GDB_PACKET_BUFFER_SIZE);
+				packet->size = 0;
+			}
 #endif
-	if (c == '$' || c == '#' || c == '}' || c == '*') {
-		gdb_if_putchar('}', 0);
-		gdb_if_putchar(c ^ 0x20U, 0);
-		*csum += '}' + (c ^ 0x20U);
+			/* EOT (end of transmission) - connection was closed */
+			else if (rx_char == '\x04') {
+				packet->data[1U] = '\0'; /* Null terminate */
+				packet->size = 1U;
+				return packet;
+			}
+			break;
+
+		case PACKET_GDB_CAPTURE:
+			if (rx_char == GDB_PACKET_START) {
+				/* Restart GDB packet capture */
+				packet->size = 0;
+				break;
+			}
+			if (rx_char == GDB_PACKET_END) {
+				/* End of GDB packet */
+
+				/* Move to checksum capture */
+				state = PACKET_GDB_CHECKSUM_UPPER;
+				break;
+			}
+
+			/* Add to packet buffer, unless it is an escape char */
+			if (rx_char == GDB_PACKET_ESCAPE)
+				/* GDB Escaped char */
+				state = PACKET_GDB_ESCAPE;
+			else
+				/* Add to packet buffer */
+				packet->data[packet->size++] = rx_char;
+			break;
+
+		case PACKET_GDB_ESCAPE:
+			/* Resolve escaped char */
+			packet->data[packet->size++] = rx_char ^ GDB_PACKET_ESCAPE_XOR;
+
+			/* Return to normal packet capture */
+			state = PACKET_GDB_CAPTURE;
+			break;
+
+		case PACKET_GDB_CHECKSUM_UPPER:
+			/* Checksum upper nibble */
+			if (!noackmode)
+				/* As per GDB spec, checksums can be ignored in NoAckMode */
+				rx_checksum = unhex_digit(rx_char) << 4U; /* This also clears the lower nibble */
+			state = PACKET_GDB_CHECKSUM_LOWER;
+			break;
+
+		case PACKET_GDB_CHECKSUM_LOWER:
+			/* Checksum lower nibble */
+			if (!noackmode) {
+				/* As per GDB spec, checksums can be ignored in NoAckMode */
+				rx_checksum |= unhex_digit(rx_char); /* BITWISE OR lower nibble with upper nibble */
+
+				/* (N)Acknowledge packet */
+				const bool checksum_ok = gdb_packet_checksum(packet) == rx_checksum;
+				gdb_if_putchar(checksum_ok ? GDB_PACKET_ACK : GDB_PACKET_NACK, true);
+				if (!checksum_ok) {
+					/* Checksum error, restart packet capture */
+					state = PACKET_IDLE;
+					break;
+				}
+			}
+
+			/* Null terminate packet */
+			packet->data[packet->size] = '\0';
+
+#ifndef DEBUG_GDB_IS_NOOP
+			/* Log packet for debugging */
+			gdb_packet_debug(__func__, packet);
+#endif
+
+			/* Return captured packet */
+			return packet;
+
+		default:
+			/* Something is not right, restart packet capture */
+			state = PACKET_IDLE;
+			break;
+		}
+
+		if (packet->size >= GDB_PACKET_BUFFER_SIZE)
+			/* Buffer overflow, restart packet capture */
+			state = PACKET_IDLE;
+	}
+}
+
+static inline bool gdb_get_ack(const uint32_t timeout)
+{
+	/* Return true early if NoAckMode is enabled */
+	if (noackmode)
+		return true;
+
+	/* Wait for ACK/NACK */
+	return gdb_if_getchar_to(timeout) == GDB_PACKET_ACK;
+}
+
+static inline void gdb_if_putchar_escaped(const char value)
+{
+	/* Escape reserved characters */
+	if (gdb_packet_is_reserved(value)) {
+		gdb_if_putchar(GDB_PACKET_ESCAPE, false);
+		gdb_if_putchar((char)((uint8_t)value ^ GDB_PACKET_ESCAPE_XOR), false);
 	} else {
-		gdb_if_putchar(c, 0);
-		*csum += c;
+		gdb_if_putchar(value, false);
 	}
 }
 
-void gdb_putpacket2(const char *const packet1, const size_t size1, const char *const packet2, const size_t size2)
+void gdb_packet_send(const gdb_packet_s *const packet)
 {
-	char xmit_csum[3];
-	size_t tries = 0;
+	/* Calculate checksum first to avoid re-calculation */
+	const uint8_t checksum = gdb_packet_checksum(packet);
 
-	do {
-		DEBUG_GDB_WIRE("%s: ", __func__);
-		uint8_t csum = 0;
-		gdb_if_putchar('$', 0);
+	/* Attempt packet transmission up to retries */
+	for (size_t attempt = 0U; attempt < GDB_PACKET_RETRIES; attempt++) {
+		/* Write start of packet */
+		gdb_if_putchar(packet->notification ? GDB_PACKET_NOTIFICATION_START : GDB_PACKET_START, false);
 
-		for (size_t i = 0; i < size1; ++i)
-			gdb_next_char(packet1[i], &csum);
-		for (size_t i = 0; i < size2; ++i)
-			gdb_next_char(packet2[i], &csum);
+		/* Write packet data */
+		for (size_t i = 0; i < packet->size; i++)
+			gdb_if_putchar_escaped(packet->data[i]);
 
-		gdb_if_putchar('#', 0);
-		snprintf(xmit_csum, sizeof(xmit_csum), "%02X", csum);
-		gdb_if_putchar(xmit_csum[0], 0);
-		gdb_if_putchar(xmit_csum[1], 1);
-		DEBUG_GDB_WIRE("\n");
-	} while (gdb_if_getchar_to(2000) != '+' && tries++ < 3U);
+		/* Write end of packet */
+		gdb_if_putchar(GDB_PACKET_END, false);
+
+		/* Write checksum and flush the buffer */
+		gdb_if_putchar(hex_digit(checksum >> 4U), false);
+		gdb_if_putchar(hex_digit(checksum & 0xfU), true);
+
+#ifndef DEBUG_GDB_IS_NOOP
+		/* Log packet for debugging */
+		gdb_packet_debug(__func__, packet);
+#endif
+
+		/* Wait for ACK/NACK on standard packets */
+		if (packet->notification || gdb_get_ack(2000U))
+			break;
+	}
 }
 
-void gdb_putpacket(const char *const packet, const size_t size)
+void gdb_put_packet(const char *preamble, size_t preamble_size, const char *data, size_t data_size, bool hex_data)
 {
-	char xmit_csum[3];
-	size_t tries = 0;
+	gdb_packet_s *packet = gdb_full_packet_buffer();
 
-	do {
-		DEBUG_GDB_WIRE("%s: ", __func__);
-		uint8_t csum = 0;
-		gdb_if_putchar('$', 0);
-		for (size_t i = 0; i < size; ++i)
-			gdb_next_char(packet[i], &csum);
-		gdb_if_putchar('#', 0);
-		snprintf(xmit_csum, sizeof(xmit_csum), "%02X", csum);
-		gdb_if_putchar(xmit_csum[0], 0);
-		gdb_if_putchar(xmit_csum[1], 1);
-		DEBUG_GDB_WIRE("\n");
-	} while (gdb_if_getchar_to(2000) != '+' && tries++ < 3U);
+	/*
+	 * Create a packet using the internal packet buffer
+	 * This destroys the previous packet in the buffer
+	 * any packets obtained from gdb_packet_receive() will be invalidated
+	 */
+	packet->notification = false;
+	packet->size = 0;
+
+	/*
+	 * Copy the preamble and data into the packet buffer, limited by the buffer size
+	 *
+	 * This considers GDB_PACKET_BUFFER_SIZE to be the maximum size of the packet
+	 * But it does not take into consideration the extra space needed for escaping
+	 * This is safe because the escaping is done during the actual packet transmission
+	 * but it will result in a packet larger than what we told GDB we could handle
+	 */
+	if (preamble != NULL && preamble_size > 0) {
+		preamble_size = MIN(preamble_size, GDB_PACKET_BUFFER_SIZE);
+		memcpy(packet->data, preamble, preamble_size);
+		packet->size = preamble_size;
+	}
+
+	/* Add the data to the packet buffer and transform it if needed */
+	if (data != NULL && data_size > 0) {
+		/* Hex data doubles in size */
+		if (hex_data)
+			data_size *= 2U;
+
+		/* Limit the data size to the remaining space in the packet buffer */
+		const size_t remaining_size = GDB_PACKET_BUFFER_SIZE - packet->size;
+		data_size = MIN(data_size, remaining_size);
+
+		/* Copy the data into the packet buffer */
+		if (hex_data)
+			hexify(packet->data + packet->size, data, data_size / 2U);
+		else
+			memcpy(packet->data + packet->size, data, data_size);
+		packet->size += data_size;
+	}
+
+	/* Transmit the packet */
+	gdb_packet_send(packet);
 }
 
-void gdb_put_notification(const char *const packet, const size_t size)
+void gdb_putpacket_str_f(const char *const fmt, ...)
 {
-	char xmit_csum[3];
+	gdb_packet_s *packet = gdb_full_packet_buffer();
+	/*
+	 * Create a packet using the internal packet buffer
+	 * This destroys the previous packet in the buffer
+	 * any packets obtained from gdb_packet_receive() will be invalidated
+	 */
+	packet->notification = false;
 
-	DEBUG_GDB_WIRE("%s: ", __func__);
-	uint8_t csum = 0;
-	gdb_if_putchar('%', 0);
-	for (size_t i = 0; i < size; ++i)
-		gdb_next_char(packet[i], &csum);
-	gdb_if_putchar('#', 0);
-	snprintf(xmit_csum, sizeof(xmit_csum), "%02X", csum);
-	gdb_if_putchar(xmit_csum[0], 0);
-	gdb_if_putchar(xmit_csum[1], 1);
-	DEBUG_GDB_WIRE("\n");
-}
-
-void gdb_putpacket_f(const char *const fmt, ...)
-{
+	/*
+	 * Format the string directly into the packet buffer
+	 * This considers GDB_PACKET_BUFFER_SIZE to be the maximum size of the string
+	 * But it does not take into consideration the extra space needed for escaping
+	 * This is safe because the escaping is done during the actual packet transmission
+	 * but it will result in a packet larger than what we told GDB we could handle
+	 */
 	va_list ap;
-	char *buf;
-
 	va_start(ap, fmt);
-	const int size = vasprintf(&buf, fmt, ap);
-	if (size > 0)
-		gdb_putpacket(buf, size);
-	free(buf);
+	vsnprintf(packet->data, sizeof(packet->data), fmt, ap);
 	va_end(ap);
+
+	/* Get the size of the formatted string */
+	packet->size = strnlen(packet->data, GDB_PACKET_BUFFER_SIZE);
+
+	/* Transmit the packet */
+	gdb_packet_send(packet);
 }
 
-void gdb_out(const char *const buf)
+void gdb_put_notification_str(const char *const str)
 {
-	const size_t buf_len = strlen(buf);
-	char *hexdata = calloc(1, 2U * buf_len + 1U);
-	if (!hexdata)
-		return;
+	gdb_packet_s *packet = gdb_full_packet_buffer();
+	/*
+	 * Create a packet using the internal packet buffer
+	 * This destroys the previous packet in the buffer
+	 * any packets obtained from gdb_packet_receive() will be invalidated
+	 */
+	packet->notification = true;
 
-	hexify(hexdata, buf, buf_len);
-	gdb_putpacket2("O", 1, hexdata, 2U * buf_len);
-	free(hexdata);
+	packet->size = strnlen(str, GDB_PACKET_BUFFER_SIZE);
+	memcpy(packet->data, str, packet->size);
+
+	/* Transmit the packet */
+	gdb_packet_send(packet);
+}
+
+void gdb_out(const char *const str)
+{
+	/**
+     * Program console output packet
+     * See https://sourceware.org/gdb/current/onlinedocs/gdb.html/Stop-Reply-Packets.html#Stop-Reply-Packets
+     * 
+     * Format: ‘O XX…’
+     * ‘XX…’ is hex encoding of ASCII data, to be written as the program’s console output.
+     * 
+     * Can happen at any time while the program is running and the debugger should continue to wait for ‘W’, ‘T’, etc.
+     * This reply is not permitted in non-stop mode.
+     */
+	gdb_put_packet("O", 1U, str, strnlen(str, GDB_OUT_PACKET_MAX_SIZE), true);
 }
 
 void gdb_voutf(const char *const fmt, va_list ap)
 {
-	char *buf;
-	if (vasprintf(&buf, fmt, ap) < 0)
-		return;
+	/*
+	 * We could technically do the formatting and transformation in a single buffer reducing stack usage
+	 * But it is a bit more complex and likely slower, we would need to spread the characters out such
+	 * that each occupies two bytes, and then we could hex them in place
+	 * 
+	 * If this stack usage proves to be a problem, we can revisit this
+	 */
+	char str_scratch[GDB_OUT_PACKET_MAX_SIZE + 1U];
 
-	gdb_out(buf);
-	free(buf);
+	/* Format the string into the scratch buffer */
+	vsnprintf(str_scratch, sizeof(str_scratch), fmt, ap);
+
+	/* Delegate the rest of the work to gdb_out */
+	gdb_out(str_scratch);
 }
 
 void gdb_outf(const char *const fmt, ...)
 {
+	/* Wrap the va_list version of gdb_voutf */
 	va_list ap;
-
 	va_start(ap, fmt);
 	gdb_voutf(fmt, ap);
 	va_end(ap);

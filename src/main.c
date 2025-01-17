@@ -21,6 +21,7 @@
 /* Provides main entry point. Initialise subsystems and enter GDB protocol loop. */
 
 #include "general.h"
+#include "platform.h"
 #include "gdb_if.h"
 #include "gdb_main.h"
 #include "target.h"
@@ -31,9 +32,6 @@
 #ifdef ENABLE_RTT
 #include "rtt.h"
 #endif
-
-#define BUF_SIZE 1024U
-static char pbuf[BUF_SIZE + 1U];
 
 static void bmp_poll_loop(void)
 {
@@ -56,35 +54,35 @@ static void bmp_poll_loop(void)
 	}
 
 	SET_IDLE_STATE(true);
-	size_t size = gdb_getpacket(pbuf, BUF_SIZE);
+	const gdb_packet_s *const packet = gdb_packet_receive();
 	// If port closed and target detached, stay idle
-	if (pbuf[0] != '\x04' || cur_target)
+	if (packet->data[0] != '\x04' || cur_target)
 		SET_IDLE_STATE(false);
-	gdb_main(pbuf, sizeof(pbuf), size);
+	gdb_main(packet);
 }
 
+#if CONFIG_BMDA == 1
 int main(int argc, char **argv)
 {
-#if PC_HOSTED == 1
 	platform_init(argc, argv);
 #else
-	(void)argc;
-	(void)argv;
+int main(void)
+{
 	platform_init();
 #endif
 
 	while (true) {
-		volatile exception_s e;
-		TRY_CATCH (e, EXCEPTION_ALL) {
+		TRY (EXCEPTION_ALL) {
 			bmp_poll_loop();
 		}
-		if (e.type) {
-			gdb_putpacketz("EFF");
+		CATCH () {
+		default:
+			gdb_put_packet_error(0xffU);
 			target_list_free();
-			gdb_outf("Uncaught exception: %s\n", e.msg);
+			gdb_outf("Uncaught exception: %s\n", exception_frame.msg);
 			morse("TARGET LOST.", true);
 		}
-#if PC_HOSTED == 1
+#if CONFIG_BMDA == 1
 		if (shutdown_bmda)
 			break;
 #endif
