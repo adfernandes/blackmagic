@@ -24,9 +24,11 @@
  */
 
 #include "general.h"
+#include "platform.h"
 #include "usb.h"
 #include "aux_serial.h"
 
+#include <libopencm3/cm3/vector.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/scs.h>
@@ -99,7 +101,6 @@ void platform_init(void)
 	AFIO_MAPR = data;
 
 	/* Relocate interrupt vector table here */
-	extern uint32_t vector_table;
 	SCB_VTOR = (uintptr_t)&vector_table;
 
 	platform_timing_init();
@@ -156,7 +157,7 @@ const char *platform_target_voltage(void)
 	const uint8_t channel = 0;
 	switch (rev) {
 	case 0:
-		adc_set_regular_sequence(ADC1, 1, (uint8_t *)&channel);
+		adc_set_regular_sequence(ADC1, 1, &channel);
 		adc_start_conversion_direct(ADC1);
 		/* Wait for end of conversion. */
 		while (!adc_eoc(ADC1))
@@ -171,7 +172,7 @@ const char *platform_target_voltage(void)
 		ret[2] = '0' + value % 10U;
 		return ret;
 	}
-	return NULL;
+	return "Unknown";
 }
 
 void set_idle_state(int state)
@@ -189,4 +190,28 @@ void set_idle_state(int state)
 void platform_target_clk_output_enable(bool enable)
 {
 	(void)enable;
+}
+
+bool platform_spi_init(const spi_bus_e bus)
+{
+	(void)bus;
+	return false;
+}
+
+bool platform_spi_deinit(const spi_bus_e bus)
+{
+	(void)bus;
+	return false;
+}
+
+bool platform_spi_chip_select(const uint8_t device_select)
+{
+	(void)device_select;
+	return false;
+}
+
+uint8_t platform_spi_xfer(const spi_bus_e bus, const uint8_t value)
+{
+	(void)bus;
+	return value;
 }

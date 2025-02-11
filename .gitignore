@@ -21,3 +21,11 @@ blackmagic_upgrade
 .gdb_history
 src/artifacts/
 
+src/ftd2xx.dll
+
+scripts/swolisten
+
+.direnv/
+
+/deps/*
+!/deps/*.wrap

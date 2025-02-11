@@ -30,7 +30,7 @@
 #define PLATFORM_HAS_TRACESWO
 #define PLATFORM_HAS_POWER_SWITCH
 
-#ifdef ENABLE_DEBUG
+#if ENABLE_DEBUG == 1
 #define PLATFORM_HAS_DEBUG
 extern bool debug_bmp;
 #endif
@@ -38,11 +38,12 @@ extern bool debug_bmp;
 #define PLATFORM_IDENT   ""
 #define UPD_IFACE_STRING "@Internal Flash   /0x08000000/8*001Kg"
 
+extern int hwversion;
 /*
  * Hardware version switcher helper - when the hardware
  * version is smaller than ver it outputs opt1, otherwise opt2
  */
-#define HW_SWITCH(ver, opt1, opt2) (platform_hwversion() < (ver) ? (opt1) : (opt2))
+#define HW_SWITCH(ver, opt1, opt2) (hwversion < (ver) ? (opt1) : (opt2))
 
 /*
  * Important pin mappings for native implementation:
@@ -55,7 +56,7 @@ extern bool debug_bmp;
  * nTRST    = PB1  (output) [blackmagic]
  * PWR_BR   = PB1  (output) [blackmagic_mini] -- supply power to the target, active low
  * TMS_DIR  = PA1  (output) [blackmagic_mini v2.1] -- choose direction of the TCK pin, input low, output high
- * nRST_OUT = PA2  (output) -- Hardware 5 and older
+ * nRST     = PA2  (output) -- Hardware 5 and older
  *          = PA9  (output) -- Hardware 6 and newer
  * TDI      = PA3  (output) -- Hardware 5 and older
  *          = PA7  (output) -- Hardware 6 and newer
@@ -67,7 +68,7 @@ extern bool debug_bmp;
  *                             Hardware 4 has a normally open jumper between TDO and TRACESWO
  *                             Hardware 5 has hardwired connection between TDO and TRACESWO
  *          = PA10 (input)  -- Hardware 6 and newer
- * nRST     = PA7  (input)  -- Hardware 5 and older
+ * nRST_SNS = PA7  (input)  -- Hardware 5 and older
  *          = PC13 (input)  -- Hardware 6 and newer
  *
  * USB_PU   = PA8  (output)
@@ -100,6 +101,8 @@ extern bool debug_bmp;
  * BTN1       = PB12 (input)  -- Shared with the DFU bootloader button
  * BTN2       = PB9  (input)
  * VBAT       = PA0  (input)  -- Battery voltage sense ADC2, CH0
+ *
+ * nRST_SNS is the nRST sense line
  */
 
 /* Hardware definitions... */
@@ -126,15 +129,34 @@ extern bool debug_bmp;
 
 #define TRST_PORT       GPIOB
 #define TRST_PIN        GPIO1
-#define PWR_BR_PORT     GPIOB
-#define PWR_BR_PIN      GPIO1
 #define NRST_PORT       GPIOA
 #define NRST_PIN        HW_SWITCH(6, GPIO2, GPIO9)
-#define NRST_SENSE_PORT GPIOA
+#define NRST_SENSE_PORT HW_SWITCH(6, GPIOA, GPIOC)
 #define NRST_SENSE_PIN  HW_SWITCH(6, GPIO7, GPIO13)
 
+/*
+ * SWO comes in on PB7 (TIM4 CH2) before HW6, and PA10 (TIM1 CH3) after -
+ * however, because of Shenanigans™ with timers and other pins, this has to
+ * reuse TDO (PA6, TIM3 CH1) to not wind up clobbering timers and timer pins
+ */
+#define SWO_PORT GPIOA
+#define SWO_PIN  GPIO6
+
+/*
+ * These are the control output pin definitions for TPWR.
+ * TPWR is sensed via PB0 by sampling ADC1's channel 8.
+ */
+#define PWR_BR_PORT GPIOB
+#define PWR_BR_PIN  GPIO1
+#define TPWR_PORT   GPIOB
+#define TPWR_PIN    GPIO0
+
+/* USB pin definitions */
 #define USB_PU_PORT GPIOA
+#define USB_PORT    GPIOA
 #define USB_PU_PIN  GPIO8
+#define USB_DP_PIN  GPIO12
+#define USB_DM_PIN  GPIO11
 
 /* For HW Rev 4 and older */
 #define USB_VBUS_PORT GPIOB
@@ -173,7 +195,6 @@ extern bool debug_bmp;
 #define AUX_DDC_PORT  AUX_PORT
 #define AUX_BTN1_PORT AUX_PORT
 #define AUX_BTN2_PORT AUX_PORT
-#define AUX_VBAT_PORT GPIOA
 #define AUX_SCLK      GPIO13
 #define AUX_COPI      GPIO15
 #define AUX_CIPO      GPIO14
@@ -184,7 +205,15 @@ extern bool debug_bmp;
 #define AUX_DDC       GPIO8
 #define AUX_BTN1      GPIO12
 #define AUX_BTN2      GPIO9
+/* Note that VBat is on PA0, not PB. */
+#define AUX_VBAT_PORT GPIOA
 #define AUX_VBAT      GPIO0
+
+/* SPI bus definitions */
+#define AUX_SPI         SPI2
+#define EXT_SPI         SPI1
+#define EXT_SPI_CS_PORT GPIOA
+#define EXT_SPI_CS      GPIO4
 
 #define SWD_CR       GPIO_CRL(SWDIO_PORT)
 #define SWD_CR_SHIFT (4U << 2U)
@@ -231,7 +260,8 @@ extern bool debug_bmp;
 #define IRQ_PRI_USBUSART     (2U << 4U)
 #define IRQ_PRI_USBUSART_DMA (2U << 4U)
 #define IRQ_PRI_USB_VBUS     (14U << 4U)
-#define IRQ_PRI_TRACE        (0U << 4U)
+#define IRQ_PRI_SWO_TIM      (0U << 4U)
+#define IRQ_PRI_SWO_DMA      (0U << 4U)
 
 #define USBUSART        HW_SWITCH(6, USBUSART1, USBUSART2)
 #define USBUSART_IRQ    HW_SWITCH(6, NVIC_USART1_IRQ, NVIC_USART2_IRQ)
@@ -255,7 +285,7 @@ extern bool debug_bmp;
 #define USBUSART1_DMA_TX_ISR(x) dma1_channel4_isr(x)
 #define USBUSART1_DMA_RX_CHAN   DMA_CHANNEL5
 #define USBUSART1_DMA_RX_IRQ    NVIC_DMA1_CHANNEL5_IRQ
-#define USBUSART1_DMA_RX_ISR(x) dma1_channel5_isr(x)
+#define USBUSART1_DMA_RX_ISR(x) usart1_rx_dma_isr(x)
 
 #define USBUSART2               USART2
 #define USBUSART2_IRQ           NVIC_USART2_IRQ
@@ -267,35 +297,80 @@ extern bool debug_bmp;
 #define USBUSART2_DMA_RX_IRQ    NVIC_DMA1_CHANNEL6_IRQ
 #define USBUSART2_DMA_RX_ISR(x) dma1_channel6_isr(x)
 
-#define TRACE_TIM          TIM3
-#define TRACE_TIM_CLK_EN() rcc_periph_clock_enable(RCC_TIM3)
-#define TRACE_IRQ          NVIC_TIM3_IRQ
-#define TRACE_ISR(x)       tim3_isr(x)
+/* Use TIM3 Input 1 (from PA6/TDO) for Manchester data recovery */
+#define SWO_TIM TIM3
+#define SWO_TIM_CLK_EN()
+#define SWO_TIM_IRQ         NVIC_TIM3_IRQ
+#define SWO_TIM_ISR(x)      tim3_isr(x)
+#define SWO_IC_IN           TIM_IC_IN_TI1
+#define SWO_IC_RISING       TIM_IC1
+#define SWO_CC_RISING       TIM3_CCR1
+#define SWO_ITR_RISING      TIM_DIER_CC1IE
+#define SWO_STATUS_RISING   TIM_SR_CC1IF
+#define SWO_IC_FALLING      TIM_IC2
+#define SWO_CC_FALLING      TIM3_CCR2
+#define SWO_STATUS_FALLING  TIM_SR_CC2IF
+#define SWO_STATUS_OVERFLOW (TIM_SR_CC1OF | TIM_SR_CC2OF)
+#define SWO_TRIG_IN         TIM_SMCR_TS_TI1FP1
+
+/* Use PA10 (USART1) on HW6+ for UART/NRZ/Async data recovery */
+#define SWO_UART        HW_SWITCH(6, 0U, USART1)
+#define SWO_UART_CLK    RCC_USART1
+#define SWO_UART_DR     USART1_DR
+#define SWO_UART_PORT   GPIOA
+#define SWO_UART_RX_PIN GPIO10
+
+#define SWO_DMA_BUS    DMA1
+#define SWO_DMA_CLK    RCC_DMA1
+#define SWO_DMA_CHAN   DMA_CHANNEL5
+#define SWO_DMA_IRQ    NVIC_DMA1_CHANNEL5_IRQ
+#define SWO_DMA_ISR(x) swo_dma_isr(x)
 
 #define SET_RUN_STATE(state)   running_status = (state)
 #define SET_IDLE_STATE(state)  gpio_set_val(LED_PORT, LED_IDLE_RUN, state)
 #define SET_ERROR_STATE(state) gpio_set_val(LED_PORT, LED_ERROR, state)
 
-/* Use newlib provided integer-only stdio functions */
+/*
+ * These are bounce declarations for the ISR handlers competing for dma1_channel5_isr().
+ * The actual handler is defined in platform.c, the USART1 RX handler in aux_serial.c,
+ * and the SWO DMA handler in swo_uart.c.
+ */
+void usart1_rx_dma_isr(void);
+void swo_dma_isr(void);
 
-#ifdef sscanf
-#undef sscanf
-#endif
-#define sscanf siscanf
+/* Frequency constants (in Hz) for the bitbanging routines */
+#define BITBANG_CALIBRATED_FREQS
+/*
+ * The 3 major JTAG bitbanging routines that get called result in these stats for
+ * clock frequency being generated with the _no_delay routines:
+ * jtag_proc.jtagtap_next(): 705.882kHz
+ * jtag_proc.jtagtap_tms_seq(): 4.4MHz
+ * jtag_proc.jtagtap_tdi_tdo_seq(): 750kHz
+ * The result is an average 1.95MHz achieved.
+ */
+#define BITBANG_NO_DELAY_FREQ 1951961U
+/*
+ * On the _swd_delay routines with the delay loops inoperative, we then get:
+ * jtag_proc.jtagtap_next(): 626.181kHz
+ * jtag_proc.jtagtap_tms_seq(): 2.8MHz
+ * jtag_proc.jtagtap_tdi_tdo_seq(): 727.27kHz
+ * The result is an average 1.38MHz achieved.
+ */
+#define BITBANG_0_DELAY_FREQ 1384484U
+/*
+ * On the _swd_delay routines with the delay set to 1, we then get:
+ * jtag_proc.jtagtap_next(): 521.739kHz
+ * jtag_proc.jtagtap_tms_seq(): 1.378MHz
+ * jtag_proc.jtagtap_tdi_tdo_seq(): 583.624kHz
+ * The result is an average 827.788kHz achieved
+ */
 
-#ifdef sprintf
-#undef sprintf
-#endif
-#define sprintf siprintf
-
-#ifdef vasprintf
-#undef vasprintf
-#endif
-#define vasprintf vasiprintf
-
-#ifdef snprintf
-#undef snprintf
-#endif
-#define snprintf sniprintf
+/*
+ * After taking samples with the delay set to 2, 3, and 4 as well, then running
+ * a linear regression on the results using the divider calculation tool, we arrive
+ * at an offset of 52 for the ratio and a division factor of 30 to produce divider numbers
+ */
+#define BITBANG_DIVIDER_OFFSET 52U
+#define BITBANG_DIVIDER_FACTOR 30U
 
 #endif /* PLATFORMS_NATIVE_PLATFORM_H */

@@ -18,32 +18,117 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <sys/stat.h>
-#include <sys/select.h>
-#include <dirent.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
-
 #include "general.h"
 #include "remote.h"
 #include "bmp_hosted.h"
 #include "utils.h"
 #include "cortexm.h"
 
-static int fd; /* File descriptor for connection to GDB remote */
+#include <sys/stat.h>
+#include <sys/select.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <termios.h>
+#ifndef _MSC_VER
+#include <unistd.h>
+#endif
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
+#define READ_BUFFER_LENGTH 4096U
+
+/* File descriptor for the connection to the remote BMP */
+static int fd;
+/* Buffer for read request data + fullness and next read position values */
+static uint8_t read_buffer[READ_BUFFER_LENGTH];
+static size_t read_buffer_fullness = 0U;
+static size_t read_buffer_offset = 0U;
+
+#ifndef _WIN32
+inline int closesocket(const int socket)
+{
+	return close(socket);
+}
+#endif
+
+/* Socket code taken from https://beej.us/guide/bgnet/ */
+static bool try_opening_network_device(const char *const name)
+{
+	if (!name)
+		return false;
+
+	struct addrinfo addr_hints = {
+		.ai_family = AF_UNSPEC,
+		.ai_socktype = SOCK_STREAM,
+		.ai_protocol = IPPROTO_TCP,
+		.ai_flags = AI_ADDRCONFIG | AI_V4MAPPED,
+	};
+	struct addrinfo *results;
+
+	// Maximum legal length of a hostname
+	char hostname[256];
+
+	// Copy the hostname to an internal array. We need to modify it
+	// to separate the hostname from the service name.
+	if (strlen(name) >= sizeof(hostname)) {
+		DEBUG_WARN("Hostname:port must be shorter than 255 characters\n");
+		return false;
+	}
+	strncpy(hostname, name, sizeof(hostname) - 1U);
+
+	// The service name or port number
+	char *service_name = strstr(hostname, ":");
+	if (service_name == NULL) {
+		DEBUG_WARN("Device name is not a network address in the format hostname:port\n");
+		return false;
+	}
+
+	// Separate the service name / port number from the hostname
+	*service_name = '\0';
+	++service_name;
+
+	if (*service_name == '\0')
+		return false;
+
+	if (getaddrinfo(hostname, service_name, &addr_hints, &results) != 0)
+		return false;
+
+	// Loop through all the results and connect to the first we can.
+	struct addrinfo *server_addr;
+	for (server_addr = results; server_addr != NULL; server_addr = server_addr->ai_next) {
+		fd = socket(server_addr->ai_family, server_addr->ai_socktype, server_addr->ai_protocol);
+		if (fd == -1)
+			continue;
+
+		if (connect(fd, server_addr->ai_addr, server_addr->ai_addrlen) == -1) {
+			closesocket(fd);
+			continue;
+		}
+
+		// If we get here, we must have connected successfully
+		break;
+	}
+	freeaddrinfo(results);
+
+	if (server_addr == NULL)
+		return false;
+
+	return true;
+}
 
 /* A nice routine grabbed from
  * https://stackoverflow.com/questions/6947413/how-to-open-read-and-write-from-serial-port-in-c
  */
-static int set_interface_attribs(void)
+static bool set_interface_attribs(void)
 {
 	struct termios tty;
 	memset(&tty, 0, sizeof tty);
 	if (tcgetattr(fd, &tty) != 0) {
-		DEBUG_WARN("error %d from tcgetattr", errno);
-		return -1;
+		DEBUG_ERROR("error %d from tcgetattr", errno);
+		return false;
 	}
 
 	tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8; // 8-bit chars
@@ -65,21 +150,21 @@ static int set_interface_attribs(void)
 	tty.c_cflag &= ~CRTSCTS;
 #endif
 	if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-		DEBUG_WARN("error %d from tcsetattr", errno);
-		return -1;
+		DEBUG_ERROR("error %d from tcsetattr", errno);
+		return false;
 	}
-	return 0;
+	return true;
 }
 
 #ifdef __APPLE__
-int serial_open(const bmda_cli_options_s *cl_opts, const char *serial)
+bool serial_open(const bmda_cli_options_s *cl_opts, const char *serial)
 {
 	char name[4096];
 	if (!cl_opts->opt_device) {
 		/* Try to find some BMP if0*/
 		if (!serial) {
 			DEBUG_WARN("No serial device found\n");
-			return -1;
+			return false;
 		} else {
 			sprintf(name, "/dev/cu.usbmodem%s1", serial);
 		}
@@ -88,8 +173,10 @@ int serial_open(const bmda_cli_options_s *cl_opts, const char *serial)
 	}
 	fd = open(name, O_RDWR | O_SYNC | O_NOCTTY);
 	if (fd < 0) {
-		DEBUG_WARN("Couldn't open serial port %s\n", name);
-		return -1;
+		if (try_opening_network_device(name))
+			return true;
+		DEBUG_ERROR("Couldn't open serial port %s\n", name);
+		return false;
 	}
 	/* BMP only offers an USB-Serial connection with no real serial
      * line in between. No need for baudrate or parity.!
@@ -128,7 +215,7 @@ static bool match_serial(const char *const device, const char *const serial)
 	return contains_substring(begin, end - begin, serial);
 }
 
-int serial_open(const bmda_cli_options_s *const cl_opts, const char *const serial)
+bool serial_open(const bmda_cli_options_s *const cl_opts, const char *const serial)
 {
 	char name[4096];
 	if (!cl_opts->opt_device) {
@@ -136,7 +223,7 @@ int serial_open(const bmda_cli_options_s *const cl_opts, const char *const seria
 		DIR *dir = opendir(DEVICE_BY_ID);
 		if (!dir) {
 			DEBUG_WARN("No serial devices found\n");
-			return -1;
+			return false;
 		}
 		size_t matches = 0;
 		size_t total = 0;
@@ -159,8 +246,8 @@ int serial_open(const bmda_cli_options_s *const cl_opts, const char *const seria
 		}
 		closedir(dir);
 		if (total == 0) {
-			DEBUG_WARN("No Black Magic Probes found\n");
-			return -1;
+			DEBUG_ERROR("No Black Magic Probes found\n");
+			return false;
 		}
 		if (matches != 1) {
 			DEBUG_INFO("Available Probes:\n");
@@ -175,12 +262,12 @@ int serial_open(const bmda_cli_options_s *const cl_opts, const char *const seria
 				}
 				closedir(dir);
 				if (serial)
-					DEBUG_WARN("No match for (partial) serial number \"%s\"\n", serial);
+					DEBUG_ERROR("No match for (partial) serial number \"%s\"\n", serial);
 				else
 					DEBUG_WARN("Select probe with `-s <(Partial) Serial Number>`\n");
 			} else
-				DEBUG_WARN("Could not scan %s: %s\n", name, strerror(errno));
-			return -1;
+				DEBUG_ERROR("Could not scan %s: %s\n", name, strerror(errno));
+			return false;
 		}
 	} else {
 		const size_t path_len = strlen(cl_opts->opt_device);
@@ -188,10 +275,15 @@ int serial_open(const bmda_cli_options_s *const cl_opts, const char *const seria
 		memcpy(name, cl_opts->opt_device, truncated_len);
 		name[truncated_len] = '\0';
 	}
+	/* Reset the read buffer before opening the target BMP */
+	read_buffer_fullness = 0U;
+	read_buffer_offset = 0U;
 	fd = open(name, O_RDWR | O_SYNC | O_NOCTTY);
 	if (fd < 0) {
-		DEBUG_WARN("Couldn't open serial port %s\n", name);
-		return -1;
+		if (try_opening_network_device(name))
+			return true;
+		DEBUG_ERROR("Couldn't open serial port %s\n", name);
+		return false;
 	}
 	/* BMP only offers an USB-Serial connection with no real serial
 	 * line in between. No need for baudrate or parity.!
@@ -205,76 +297,98 @@ void serial_close(void)
 	close(fd);
 }
 
-int platform_buffer_write(const uint8_t *data, int size)
+bool platform_buffer_write(const void *const data, const size_t length)
 {
-	DEBUG_WIRE("%s\n", data);
-	const int written = write(fd, data, size);
+	DEBUG_WIRE("%s\n", (const char *)data);
+	const ssize_t written = write(fd, data, length);
 	if (written < 0) {
 		const int error = errno;
-		DEBUG_WARN("Failed to write (%d): %s\n", errno, strerror(error));
+		DEBUG_ERROR("Failed to write (%d): %s\n", errno, strerror(error));
 		exit(-2);
 	}
-	return size;
+	return (size_t)written == length;
 }
 
-/* XXX: The size parameter should be size_t and we should either return size_t or bool */
-/* XXX: This needs documenting that it can abort the program with exit(), or the error handling fixed */
-int platform_buffer_read(uint8_t *data, int maxsize)
+static ssize_t bmda_read_more_data(void)
 {
-	char response = 0;
 	timeval_s timeout = {
 		.tv_sec = cortexm_wait_timeout / 1000U,
 		.tv_usec = 1000U * (cortexm_wait_timeout % 1000U),
 	};
 
-	/* Drain the buffer for the remote till we see a start-of-response byte */
-	while (response != REMOTE_RESP) {
-		fd_set select_set;
-		FD_ZERO(&select_set);
-		FD_SET(fd, &select_set);
+	fd_set select_set;
+	FD_ZERO(&select_set);
+	FD_SET(fd, &select_set);
 
-		const int result = select(FD_SETSIZE, &select_set, NULL, NULL, &timeout);
-		if (result < 0) {
-			DEBUG_WARN("Failed on select\n");
-			return -3;
+	/* Set up to wait for more data from the probe */
+	const int result = select(FD_SETSIZE, &select_set, NULL, NULL, &timeout);
+	/* If select() fails, bail */
+	if (result < 0) {
+		DEBUG_ERROR("Failed on select\n");
+		return -3;
+	}
+	/* If we timed out, bail differently */
+	if (result == 0) {
+		DEBUG_ERROR("Timeout while waiting for BMP response\n");
+		return -4;
+	}
+	/* Now we know there's data, try to fill the read buffer */
+	const ssize_t bytes_received = read(fd, read_buffer, READ_BUFFER_LENGTH);
+	/* If that failed, bail */
+	if (bytes_received < 0) {
+		const int error = errno;
+		DEBUG_ERROR("Failed to read response (%d): %s\n", error, strerror(error));
+		return -6;
+	}
+	/* We now have more data, so update the read buffer counters */
+	read_buffer_fullness = (size_t)bytes_received;
+	read_buffer_offset = 0U;
+	return 0;
+}
+
+/* XXX: We should either return size_t or bool */
+/* XXX: This needs documenting that it can abort the program with exit(), or the error handling fixed */
+int platform_buffer_read(void *const data, const size_t length)
+{
+	char *const buffer = (char *)data;
+	/* Drain the buffer for the remote till we see a start-of-response byte */
+	for (char response = 0; response != REMOTE_RESP;) {
+		if (read_buffer_offset == read_buffer_fullness) {
+			const ssize_t result = bmda_read_more_data();
+			if (result < 0)
+				return result;
 		}
-		if (result == 0) {
-			DEBUG_WARN("Timeout while waiting for BMP response\n");
-			return -4;
-		}
-		if (read(fd, &response, 1) != 1) {
-			const int error = errno;
-			DEBUG_WARN("Failed to read response (%d): %s\n", error, strerror(error));
-			return -6;
-		}
+		response = read_buffer[read_buffer_offset++];
 	}
 	/* Now collect the response */
-	for (size_t offset = 0; offset < (size_t)maxsize;) {
-		fd_set select_set;
-		FD_ZERO(&select_set);
-		FD_SET(fd, &select_set);
-		const int result = select(FD_SETSIZE, &select_set, NULL, NULL, &timeout);
-		if (result < 0) {
-			DEBUG_WARN("Failed on select\n");
-			exit(-4);
+	for (size_t offset = 0; offset < length;) {
+		/* Check if we need more data or should use what's in the buffer already */
+		if (read_buffer_offset == read_buffer_fullness) {
+			const ssize_t result = bmda_read_more_data();
+			if (result < 0)
+				return result;
 		}
-		if (result == 0) {
-			DEBUG_WARN("Timeout on read\n");
-			return -5;
+		/* Look for an end of packet marker */
+		size_t response_length = 0U;
+		for (; read_buffer_offset + response_length < read_buffer_fullness && offset + response_length < length;
+			 ++response_length) {
+			/* If we've found a REMOTE_EOM then stop scanning */
+			if (read_buffer[read_buffer_offset + response_length] == REMOTE_EOM) {
+				++response_length;
+				break;
+			}
 		}
-		if (read(fd, data + offset, 1) != 1) {
-			const int error = errno;
-			DEBUG_WARN("Failed to read response (%d): %s\n", error, strerror(error));
-			return -6;
-		}
-		if (data[offset] == REMOTE_EOM) {
-			data[offset] = 0;
-			DEBUG_WIRE("       %s\n", data);
+		/* We now either have a REMOTE_EOM or need all the data from the buffer */
+		memcpy(buffer + offset, read_buffer + read_buffer_offset, response_length);
+		read_buffer_offset += response_length;
+		offset += response_length - 1U;
+		/* If this was because of REMOTE_EOM, return */
+		if (buffer[offset] == REMOTE_EOM) {
+			buffer[offset] = 0;
+			DEBUG_WIRE("       %s\n", buffer);
 			return offset;
 		}
 		++offset;
 	}
-
-	DEBUG_WARN("Failed to read\n");
-	return -6;
+	return length;
 }

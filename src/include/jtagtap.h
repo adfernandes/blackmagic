@@ -73,10 +73,9 @@ extern jtag_proc_s jtag_proc;
 /* Goto Run-test/Idle: 1, 1, 0 */
 #define jtagtap_return_idle(cycles) jtag_proc.jtagtap_tms_seq(0x01, (cycles) + 1U)
 
-#if PC_HOSTED == 1
-bool platform_jtagtap_init(void);
-#else
-void jtagtap_init(void);
+#if CONFIG_BMDA == 1
+bool bmda_jtag_init(void);
 #endif
+void jtagtap_init(void);
 
 #endif /* INCLUDE_JTAGTAP_H */

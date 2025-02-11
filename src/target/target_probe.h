@@ -23,50 +23,88 @@
 #include "target.h"
 #include "adiv5.h"
 
+#define STRINGIFY(x) #x
+/* Probe launch macro used by the CPU-generic layers to then call CPU-specific routines safely */
+#define PROBE(x)                                    \
+	do {                                            \
+		DEBUG_TARGET("Calling " STRINGIFY(x) "\n"); \
+		if ((x)(target))                            \
+			return true;                            \
+		target_check_error(target);                 \
+	} while (0)
+
 /*
  * Probe for various targets.
  * Actual functions implemented in their respective drivers.
  */
 
-bool cortexa_probe(adiv5_access_port_s *apb, uint32_t debug_base);
-
+bool cortexa_probe(adiv5_access_port_s *ap, target_addr_t base_address);
+bool cortexr_probe(adiv5_access_port_s *ap, target_addr_t base_address);
 bool cortexm_probe(adiv5_access_port_s *ap);
 
-bool kinetis_mdm_probe(adiv5_access_port_s *ap);
-bool nrf51_mdm_probe(adiv5_access_port_s *ap);
-bool efm32_aap_probe(adiv5_access_port_s *ap);
-bool rp_rescue_probe(adiv5_access_port_s *ap);
+bool riscv32_probe(target_s *target);
+bool riscv64_probe(target_s *target);
 
-bool ch32f1_probe(target_s *t);  // will catch all the clones
-bool at32fxx_probe(target_s *t); // STM32 clones from Artery
-bool mm32l0xx_probe(target_s *t);
-bool mm32f3xx_probe(target_s *t);
-bool gd32f1_probe(target_s *t);
-bool gd32f4_probe(target_s *t);
-bool stm32f1_probe(target_s *t);
-bool stm32f4_probe(target_s *t);
-bool stm32h7_probe(target_s *t);
-bool stm32l0_probe(target_s *t);
-bool stm32l1_probe(target_s *t);
-bool stm32l4_probe(target_s *t);
-bool stm32g0_probe(target_s *t);
-bool lmi_probe(target_s *t);
-bool lpc11xx_probe(target_s *t);
-bool lpc15xx_probe(target_s *t);
-bool lpc17xx_probe(target_s *t);
-bool lpc43xx_probe(target_s *t);
-bool lpc546xx_probe(target_s *t);
-bool samx7x_probe(target_s *t);
-bool sam3x_probe(target_s *t);
-bool sam4l_probe(target_s *t);
-bool nrf51_probe(target_s *t);
-bool samd_probe(target_s *t);
-bool samx5x_probe(target_s *t);
-bool kinetis_probe(target_s *t);
-bool efm32_probe(target_s *t);
-bool msp432_probe(target_s *t);
-bool ke04_probe(target_s *t);
-bool rp_probe(target_s *t);
-bool renesas_probe(target_s *t);
+bool efm32_aap_probe(adiv5_access_port_s *ap);
+bool kinetis_mdm_probe(adiv5_access_port_s *ap);
+bool lpc55_dmap_probe(adiv5_access_port_s *ap);
+bool nrf51_ctrl_ap_probe(adiv5_access_port_s *ap);
+bool nrf54l_ctrl_ap_probe(adiv5_access_port_s *ap);
+bool rp2040_rescue_probe(adiv5_access_port_s *ap);
+
+bool at32f40x_probe(target_s *target); // STM32 clones from Artery
+bool apollo_3_probe(target_s *target);
+bool at32f43x_probe(target_s *target);
+bool ch32f1_probe(target_s *target); // will catch all the clones
+bool ch579_probe(target_s *target);
+bool efm32_probe(target_s *target);
+bool gd32f1_probe(target_s *target);
+bool gd32f4_probe(target_s *target);
+bool gd32vf1_probe(target_s *target);
+bool hc32l110_probe(target_s *target);
+bool imxrt_probe(target_s *target);
+bool ke04_probe(target_s *target);
+bool kinetis_probe(target_s *target);
+bool lmi_probe(target_s *target);
+bool lpc11xx_probe(target_s *target);
+bool lpc15xx_probe(target_s *target);
+bool lpc17xx_probe(target_s *target);
+bool lpc40xx_probe(target_s *target);
+bool lpc43xx_probe(target_s *target);
+bool lpc546xx_probe(target_s *target);
+bool lpc55xx_probe(target_s *target);
+bool mm32l0xx_probe(target_s *target);
+bool mm32f3xx_probe(target_s *target);
+bool msp432e4_probe(target_s *target);
+bool msp432p4_probe(target_s *target);
+bool mspm0_probe(target_s *target);
+bool nrf51_probe(target_s *target);
+bool nrf54l_probe(target_s *target);
+bool nrf91_probe(target_s *target);
+bool puya_probe(target_s *target);
+bool renesas_ra_probe(target_s *target);
+bool renesas_rz_probe(target_s *target);
+bool rp2040_probe(target_s *target);
+bool rp2350_probe(target_s *target);
+bool s32k3xx_probe(target_s *target);
+bool sam3x_probe(target_s *target);
+bool sam4l_probe(target_s *target);
+bool samd_probe(target_s *target);
+bool samx5x_probe(target_s *target);
+bool samx7x_probe(target_s *target);
+bool stm32f1_probe(target_s *target);
+bool stm32f4_probe(target_s *target);
+bool stm32g0_probe(target_s *target);
+bool stm32h5_probe(target_s *target);
+bool stm32h7_probe(target_s *target);
+bool stm32l0_probe(target_s *target);
+bool stm32l1_probe(target_s *target);
+bool stm32l4_probe(target_s *target);
+bool stm32mp15_ca7_probe(target_s *target);
+bool stm32mp15_cm4_probe(target_s *target);
+bool stm32wb0_probe(target_s *target);
+bool zynq7_probe(target_s *target);
+
+void lpc55_dp_prepare(adiv5_debug_port_s *dp);
 
 #endif /* TARGET_TARGET_PROBE_H */

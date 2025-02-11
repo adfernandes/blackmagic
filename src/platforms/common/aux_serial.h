@@ -27,11 +27,14 @@
 
 #if defined(STM32F0) || defined(STM32F1) || defined(STM32F3) || defined(STM32F4) || defined(STM32F7)
 /* XXX: Does the st_usbfs_v2_usb_driver work on F3 with 128 byte buffers? */
-#if defined(STM32F1) || defined(STM32F3) || defined(STM32F4) || defined(STM32F7)
+#if defined(STM32F1) || defined(STM32F3) || defined(STM32F4)
 #define USART_DMA_BUF_SHIFT 7U
 #elif defined(STM32F0)
 /* The st_usbfs_v2_usb_driver only works with up to 64-byte buffers on the F0 parts */
 #define USART_DMA_BUF_SHIFT 6U
+#elif defined(STM32F7)
+/* HS bulk packets are 512 bytes, use 2x that */
+#define USART_DMA_BUF_SHIFT 10U
 #endif
 
 #define USART_DMA_BUF_SIZE   (1U << USART_DMA_BUF_SHIFT)
@@ -40,8 +43,11 @@
 #define AUX_UART_BUFFER_SIZE 128U
 #endif
 
+typedef struct usb_cdc_line_coding usb_cdc_line_coding_s;
+
 void aux_serial_init(void);
-void aux_serial_set_encoding(usb_cdc_line_coding_s *coding);
+void aux_serial_set_encoding(const usb_cdc_line_coding_s *coding);
+void aux_serial_get_encoding(usb_cdc_line_coding_s *coding);
 
 #if defined(STM32F0) || defined(STM32F1) || defined(STM32F3) || defined(STM32F4) || defined(STM32F7)
 typedef enum aux_serial_led {
@@ -66,7 +72,7 @@ void aux_serial_send(size_t len);
 void aux_serial_update_receive_buffer_fullness(void);
 bool aux_serial_receive_buffer_empty(void);
 void aux_serial_drain_receive_buffer(void);
-#ifdef ENABLE_DEBUG
+#if ENABLE_DEBUG == 1
 void aux_serial_stage_debug_buffer(void);
 #endif
 void aux_serial_stage_receive_buffer(void);

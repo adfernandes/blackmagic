@@ -21,18 +21,23 @@
 #ifndef TARGET_STM32_COMMON_H
 #define TARGET_STM32_COMMON_H
 
+// IWYU pragma: begin_keep
 #include "general.h"
 #include "target_internal.h"
 #include "adiv5.h"
+// IWYU pragma: end_keep
+
+// Make the command list for STM32F1 parts available for, eg, CH32F1
+extern const command_s stm32f1_cmd_list[];
 
 static inline const char *stm32_psize_to_string(const align_e psize)
 {
 	switch (psize) {
-	case ALIGN_DWORD:
+	case ALIGN_64BIT:
 		return "x64";
-	case ALIGN_WORD:
+	case ALIGN_32BIT:
 		return "x32";
-	case ALIGN_HALFWORD:
+	case ALIGN_16BIT:
 		return "x16";
 	default:
 		return "x8";
@@ -42,18 +47,20 @@ static inline const char *stm32_psize_to_string(const align_e psize)
 static inline bool stm32_psize_from_string(target_s *t, const char *const str, align_e *psize)
 {
 	if (strcasecmp(str, "x8") == 0)
-		*psize = ALIGN_BYTE;
+		*psize = ALIGN_8BIT;
 	else if (strcasecmp(str, "x16") == 0)
-		*psize = ALIGN_HALFWORD;
+		*psize = ALIGN_16BIT;
 	else if (strcasecmp(str, "x32") == 0)
-		*psize = ALIGN_WORD;
+		*psize = ALIGN_32BIT;
 	else if (strcasecmp(str, "x64") == 0)
-		*psize = ALIGN_DWORD;
+		*psize = ALIGN_64BIT;
 	else {
 		tc_printf(t, "usage: monitor psize (x8|x16|x32|x32)\n");
 		return false;
 	}
 	return true;
 }
+
+bool stm32_uid(target_s *const target, target_addr_t uid_base);
 
 #endif /*TARGET_STM32_COMMON_H*/

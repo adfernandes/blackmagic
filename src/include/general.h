@@ -21,15 +21,42 @@
 #ifndef INCLUDE_GENERAL_H
 #define INCLUDE_GENERAL_H
 
+#if !defined(__cplusplus) && defined(__STDC__)
+#if __STDC__ == 1
+#define BMD_IS_STDC 1
+#endif // __STDC__
+#endif
+
+// MSVC 2022 >= 17.2 can do __STDC__
+#if defined(_MSC_VER)
+#if _MSC_VER <= 1932
+#define BMD_MSVC_PRE_172
+#endif // _MSC_VER <= 1932
+#endif
+
+#if !defined(BMD_IS_STDC) && defined(BMD_MSVC_PRE_172)
+#error "Black Magic Debug must be built in a standards compliant C mode"
+#endif
+
 #ifndef _GNU_SOURCE
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,readability-identifier-naming)
 #define _GNU_SOURCE
 #endif
 #ifndef _DEFAULT_SOURCE
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,readability-identifier-naming)
 #define _DEFAULT_SOURCE
 #endif
 #if !defined(__USE_MINGW_ANSI_STDIO)
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,readability-identifier-naming)
 #define __USE_MINGW_ANSI_STDIO 1
 #endif
+#if defined(_WIN32) || defined(__CYGWIN__)
+#include <malloc.h>
+/* `alloca()` on FreeBSD is visible from <stdlib.h>, and <alloca.h> does not exist */
+#elif !defined(__FreeBSD__)
+#include <alloca.h>
+#endif
+// IWYU pragma: begin_keep
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -39,38 +66,19 @@
 #include <inttypes.h>
 #include <sys/types.h>
 
-#include "platform.h"
+#include "timing.h"
 #include "platform_support.h"
+#include "align.h"
+// IWYU pragma: end_keep
 
 #ifndef ARRAY_LENGTH
-#define ARRAY_LENGTH(arr) (sizeof(arr) / sizeof(arr[0]))
+#define ARRAY_LENGTH(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
-
-extern uint32_t delay_cnt;
-
-#define BMP_DEBUG_NONE   0U
-#define BMP_DEBUG_INFO   (1U << 0U)
-#define BMP_DEBUG_GDB    (1U << 1U)
-#define BMP_DEBUG_TARGET (1U << 2U)
-#define BMP_DEBUG_PROBE  (1U << 3U)
-#define BMP_DEBUG_WIRE   (1U << 4U)
-#define BMP_DEBUG_MAX    (1U << 5U)
-#define BMP_DEBUG_STDOUT (1U << 15U)
 
 #define FREQ_FIXED 0xffffffffU
 
-#if PC_HOSTED == 0
+#if CONFIG_BMDA == 0
 /*
- * XXX: This entire system needs replacing with something better thought out
- * XXX: This has no error diagnostic level.
- *
- * When built as firmware, if the target supports debugging, DEBUG_WARN and DEBUG_INFO
- * get defined to a macro that turns them into printf() calls. The rest of the levels
- * turn into no-ops.
- *
- * When built as BMDA, the debug macros all turn into various kinds of console-printing
- * function, w/ gating for diagnostics other than warnings and info.
- *
  * XXX: This is not really the proper place for all this as this is too intrusive into
  * the rest of the code base. The correct way to do this would be to define a debug
  * logging layer and allow BMDA to override the default logging subsystem via
@@ -83,114 +91,87 @@ extern uint32_t delay_cnt;
 #define PRINT_NOOP(...) \
 	do {                \
 	} while (false)
-#if defined(ENABLE_DEBUG)
-#define DEBUG_WARN(...) PLATFORM_PRINTF(__VA_ARGS__)
-#define DEBUG_INFO(...) PLATFORM_PRINTF(__VA_ARGS__)
-#else
-#define DEBUG_WARN(...) PRINT_NOOP(__VA_ARGS__)
-#define DEBUG_INFO(...) PRINT_NOOP(__VA_ARGS__)
+
+#ifndef ENABLE_DEBUG
+#define ENABLE_DEBUG 0
 #endif
-#define DEBUG_GDB(...)      PRINT_NOOP(__VA_ARGS__)
-#define DEBUG_TARGET(...)   PRINT_NOOP(__VA_ARGS__)
-#define DEBUG_PROBE(...)    PRINT_NOOP(__VA_ARGS__)
-#define DEBUG_WIRE(...)     PRINT_NOOP(__VA_ARGS__)
-#define DEBUG_GDB_WIRE(...) PRINT_NOOP(__VA_ARGS__)
+
+#if ENABLE_DEBUG == 1
+#define DEBUG_ERROR(...) PLATFORM_PRINTF(__VA_ARGS__)
+#define DEBUG_WARN(...)  PLATFORM_PRINTF(__VA_ARGS__)
+#define DEBUG_INFO(...)  PLATFORM_PRINTF(__VA_ARGS__)
+#else
+#define DEBUG_ERROR(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_ERROR_IS_NOOP
+#define DEBUG_WARN(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_WARN_IS_NOOP
+#define DEBUG_INFO(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_INFO_IS_NOOP
+#endif
+#define DEBUG_GDB(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_GDB_IS_NOOP
+#define DEBUG_TARGET(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_TARGET_IS_NOOP
+#define DEBUG_PROTO(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_PROTO_IS_NOOP
+#define DEBUG_PROBE(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_PROBE_IS_NOOP
+#define DEBUG_WIRE(...) PRINT_NOOP(__VA_ARGS__)
+#define DEBUG_WIRE_IS_NOOP
 
 void debug_serial_send_stdout(const uint8_t *data, size_t len);
 #else
-#include <stdarg.h>
-extern int cl_debuglevel;
+#include "debug.h"
 
-static inline void DEBUG_WARN(const char *format, ...)
-{
-	va_list ap;
-	va_start(ap, format);
-	vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
-
-static inline void DEBUG_INFO(const char *format, ...)
-{
-	if (~cl_debuglevel & BMP_DEBUG_INFO)
-		return;
-	va_list ap;
-	va_start(ap, format);
-	if (cl_debuglevel & BMP_DEBUG_STDOUT)
-		vfprintf(stdout, format, ap);
-	else
-		vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
-
-static inline void DEBUG_GDB(const char *format, ...)
-{
-	if (~cl_debuglevel & BMP_DEBUG_GDB)
-		return;
-	va_list ap;
-	va_start(ap, format);
-	vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
-
-static inline void DEBUG_GDB_WIRE(const char *format, ...)
-{
-	if ((cl_debuglevel & (BMP_DEBUG_GDB | BMP_DEBUG_WIRE)) != (BMP_DEBUG_GDB | BMP_DEBUG_WIRE))
-		return;
-	va_list ap;
-	va_start(ap, format);
-	vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
-
-static inline void DEBUG_TARGET(const char *format, ...)
-{
-	if (~cl_debuglevel & BMP_DEBUG_TARGET)
-		return;
-	va_list ap;
-	va_start(ap, format);
-	vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
-
-static inline void DEBUG_PROBE(const char *format, ...)
-{
-	if (~cl_debuglevel & BMP_DEBUG_PROBE)
-		return;
-	va_list ap;
-	va_start(ap, format);
-	vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
-
-static inline void DEBUG_WIRE(const char *format, ...)
-{
-	if (~cl_debuglevel & BMP_DEBUG_WIRE)
-		return;
-	va_list ap;
-	va_start(ap, format);
-	vfprintf(stderr, format, ap);
-	va_end(ap);
-	return;
-}
+#define DEBUG_ERROR(...)  debug_error(__VA_ARGS__)
+#define DEBUG_WARN(...)   debug_warning(__VA_ARGS__)
+#define DEBUG_INFO(...)   debug_info(__VA_ARGS__)
+#define DEBUG_GDB(...)    debug_gdb(__VA_ARGS__)
+#define DEBUG_TARGET(...) debug_target(__VA_ARGS__)
+#define DEBUG_PROTO(...)  debug_protocol(__VA_ARGS__)
+#define DEBUG_PROBE(...)  debug_probe(__VA_ARGS__)
+#define DEBUG_WIRE(...)   debug_wire(__VA_ARGS__)
 #endif
 
-#define ALIGN(x, n) (((x) + (n)-1) & ~((n)-1))
 #undef MIN
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #undef MAX
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
-#if !defined(SYSTICKHZ)
-#define SYSTICKHZ 100U
+/* Define this macro helper if the compiler doesn't for us */
+#ifndef __has_c_attribute
+#define __has_c_attribute(x) 0
 #endif
 
-#define SYSTICKMS (1000U / SYSTICKHZ)
-#define MORSECNT  ((SYSTICKHZ / 10U) - 1U)
+/* If we're in C23 mode or newer, we can use the proper fallthrough attribute */
+#if __STDC_VERSION__ >= 202311L && __has_c_attribute(fallthrough)
+#define BMD_FALLTHROUGH [[fallthrough]];
+/* If we're on Clang, we can use the old style attribute on Clang 10 and newer */
+#elif defined(__clang__) && __clang_major__ >= 10
+#define BMD_FALLTHROUGH __attribute__((fallthrough));
+/* If we're on GCC then we have to be on at least GCC 7 for the attribute */
+#elif defined(__GNUC__) && __GNUC__ >= 7
+#define BMD_FALLTHROUGH __attribute__((fallthrough));
+/* If none of the above is true, make the annotation a no-op */
+#else
+#define BMD_FALLTHROUGH
+#endif
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#define BMD_UNUSED
+#else
+#define BMD_UNUSED __attribute__((unused))
+#endif
+
+#ifdef _MSC_VER
+#define strcasecmp  _stricmp
+#define strncasecmp _strnicmp
+#endif /* _MSC_VER */
+
+#ifndef PLATFORM_IDENT_DYNAMIC
+#define BOARD_IDENT "Black Magic Probe " PLATFORM_IDENT "" FIRMWARE_VERSION
+#else
+#define BOARD_IDENT "Black Magic Probe (%s) " FIRMWARE_VERSION
+#endif
 
 #endif /* INCLUDE_GENERAL_H */
