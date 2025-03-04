@@ -23,11 +23,19 @@
 
 #include <stdint.h>
 
+typedef struct jtag_ir_quirks {
+	uint32_t ir_value;
+	uint8_t ir_length;
+} jtag_ir_quirks_s;
+
 typedef struct jtag_dev_descr {
 	uint32_t idcode;
 	uint32_t idmask;
+#if ENABLE_DEBUG == 1
 	const char *descr;
+#endif
 	void (*handler)(uint8_t jd_index);
+	jtag_ir_quirks_s ir_quirks;
 } jtag_dev_descr_s;
 
 extern const jtag_dev_descr_s dev_descr[];

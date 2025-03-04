@@ -27,6 +27,7 @@
 #include "general.h"
 #include "target.h"
 #include "target_internal.h"
+#include "cortexm.h"
 
 static bool sam_flash_erase(target_flash_s *f, target_addr_t addr, size_t len);
 static bool sam3_flash_erase(target_flash_s *f, target_addr_t addr, size_t len);
@@ -194,7 +195,7 @@ static void sam3_add_flash(target_s *t, uint32_t eefc_base, uint32_t addr, size_
 {
 	sam_flash_s *sf = calloc(1, sizeof(*sf));
 	if (!sf) { /* calloc failed: heap exhaustion */
-		DEBUG_WARN("calloc: failed in %s\n", __func__);
+		DEBUG_ERROR("calloc: failed in %s\n", __func__);
 		return;
 	}
 
@@ -214,7 +215,7 @@ static void sam_add_flash(target_s *t, uint32_t eefc_base, uint32_t addr, size_t
 {
 	sam_flash_s *sf = calloc(1, sizeof(*sf));
 	if (!sf) { /* calloc failed: heap exhaustion */
-		DEBUG_WARN("calloc: failed in %s\n", __func__);
+		DEBUG_ERROR("calloc: failed in %s\n", __func__);
 		return;
 	}
 
@@ -248,13 +249,13 @@ static void samx7x_add_ram(target_s *t, uint32_t tcm_config, uint32_t ram_size)
 	}
 
 	if (dtcm_size > 0)
-		target_add_ram(t, 0x20000000, dtcm_size);
+		target_add_ram32(t, 0x20000000, dtcm_size);
 	if (itcm_size > 0)
-		target_add_ram(t, 0x00000000, itcm_size);
+		target_add_ram32(t, 0x00000000, itcm_size);
 
 	const uint32_t sram_size = ram_size - (itcm_size + dtcm_size);
 	if (sram_size > 0)
-		target_add_ram(t, 0x20400000, sram_size);
+		target_add_ram32(t, 0x20400000, sram_size);
 }
 
 static size_t sam_flash_size(uint32_t cidr)
@@ -297,7 +298,7 @@ static size_t sam_sram_size(uint32_t cidr)
 
 samx7x_descr_s samx7x_parse_id(uint32_t cidr, uint32_t exid)
 {
-	samx7x_descr_s descr = {};
+	samx7x_descr_s descr = {0};
 
 	switch (cidr & CHIPID_CIDR_ARCH_MASK) {
 	case CHIPID_CIDR_ARCH_SAME70:
@@ -373,10 +374,10 @@ samx7x_descr_s samx7x_parse_id(uint32_t cidr, uint32_t exid)
 
 bool samx7x_probe(target_s *t)
 {
-	const uint32_t cidr = target_mem_read32(t, SAM_CHIPID_CIDR);
+	const uint32_t cidr = target_mem32_read32(t, SAM_CHIPID_CIDR);
 	uint32_t exid = 0;
 	if (cidr & CHIPID_CIDR_EXT)
-		exid = target_mem_read32(t, SAM_CHIPID_EXID);
+		exid = target_mem32_read32(t, SAM_CHIPID_EXID);
 
 	switch (cidr & CHIPID_CIDR_ARCH_MASK) {
 	case CHIPID_CIDR_ARCH_SAME70:
@@ -390,7 +391,7 @@ bool samx7x_probe(target_s *t)
 
 	sam_priv_s *priv_storage = calloc(1, sizeof(*priv_storage));
 	if (!priv_storage) { /* calloc failed: heap exhaustion */
-		DEBUG_WARN("calloc: failed in %s\n", __func__);
+		DEBUG_ERROR("calloc: failed in %s\n", __func__);
 		return false;
 	}
 	t->target_storage = priv_storage;
@@ -406,9 +407,9 @@ bool samx7x_probe(target_s *t)
 	sam_add_flash(t, SAMX7X_EEFC_BASE, 0x00400000, priv_storage->descr.flash_size);
 	target_add_commands(t, sam_cmd_list, "SAMX7X");
 
-	sprintf(priv_storage->sam_variant_string, "SAM%c%02d%c%d%c", priv_storage->descr.product_code,
-		priv_storage->descr.product_id, priv_storage->descr.pins, priv_storage->descr.density,
-		priv_storage->descr.revision);
+	snprintf(priv_storage->sam_variant_string, sizeof(priv_storage->sam_variant_string), "SAM%c%02d%c%d%c",
+		priv_storage->descr.product_code, priv_storage->descr.product_id, priv_storage->descr.pins,
+		priv_storage->descr.density, priv_storage->descr.revision);
 
 	t->driver = priv_storage->sam_variant_string;
 	return true;
@@ -416,14 +417,15 @@ bool samx7x_probe(target_s *t)
 
 bool sam3x_probe(target_s *t)
 {
-	uint32_t cidr = target_mem_read32(t, SAM_CHIPID_CIDR);
+	uint32_t cidr = target_mem32_read32(t, SAM_CHIPID_CIDR);
 	size_t size = sam_flash_size(cidr);
 	switch (cidr & (CHIPID_CIDR_ARCH_MASK | CHIPID_CIDR_EPROC_MASK)) {
 	case CHIPID_CIDR_ARCH_SAM3XxC | CHIPID_CIDR_EPROC_CM3:
 	case CHIPID_CIDR_ARCH_SAM3XxE | CHIPID_CIDR_EPROC_CM3:
 	case CHIPID_CIDR_ARCH_SAM3XxG | CHIPID_CIDR_EPROC_CM3:
 		t->driver = "Atmel SAM3X";
-		target_add_ram(t, 0x20000000, 0x200000);
+		t->target_options |= TOPT_INHIBIT_NRST;
+		target_add_ram32(t, 0x20000000, 0x200000);
 		/* 2 Flash memories back-to-back starting at 0x80000 */
 		sam3_add_flash(t, SAM3X_EEFC_BASE(0), 0x80000, size / 2U);
 		sam3_add_flash(t, SAM3X_EEFC_BASE(1U), 0x80000 + size / 2U, size / 2U);
@@ -431,7 +433,7 @@ bool sam3x_probe(target_s *t)
 		return true;
 	}
 
-	cidr = target_mem_read32(t, SAM34NSU_CHIPID_CIDR);
+	cidr = target_mem32_read32(t, SAM34NSU_CHIPID_CIDR);
 	size = sam_flash_size(cidr);
 	switch (cidr & (CHIPID_CIDR_ARCH_MASK | CHIPID_CIDR_EPROC_MASK)) {
 	case CHIPID_CIDR_ARCH_SAM3NxA | CHIPID_CIDR_EPROC_CM3:
@@ -441,7 +443,7 @@ bool sam3x_probe(target_s *t)
 	case CHIPID_CIDR_ARCH_SAM3SxB | CHIPID_CIDR_EPROC_CM3:
 	case CHIPID_CIDR_ARCH_SAM3SxC | CHIPID_CIDR_EPROC_CM3:
 		t->driver = "Atmel SAM3N/S";
-		target_add_ram(t, 0x20000000, 0x200000);
+		target_add_ram32(t, 0x20000000, 0x200000);
 		/* These devices only have a single bank */
 		sam3_add_flash(t, SAM3N_EEFC_BASE, 0x400000, size);
 		target_add_commands(t, sam_cmd_list, "SAM3N/S");
@@ -449,7 +451,7 @@ bool sam3x_probe(target_s *t)
 	case CHIPID_CIDR_ARCH_SAM3UxC | CHIPID_CIDR_EPROC_CM3:
 	case CHIPID_CIDR_ARCH_SAM3UxE | CHIPID_CIDR_EPROC_CM3:
 		t->driver = "Atmel SAM3U";
-		target_add_ram(t, 0x20000000, 0x200000);
+		target_add_ram32(t, 0x20000000, 0x200000);
 		/* One flash up to 512K at 0x80000 */
 		sam3_add_flash(t, SAM3U_EEFC_BASE(0), 0x80000, MIN(size, 0x80000));
 		/* Larger devices have a second bank at 0x100000 */
@@ -464,7 +466,7 @@ bool sam3x_probe(target_s *t)
 	case CHIPID_CIDR_ARCH_SAM4SDB | CHIPID_CIDR_EPROC_CM4:
 	case CHIPID_CIDR_ARCH_SAM4SDC | CHIPID_CIDR_EPROC_CM4:
 		t->driver = "Atmel SAM4S";
-		target_add_ram(t, 0x20000000, 0x400000);
+		target_add_ram32(t, 0x20000000, 0x400000);
 		/* Smaller devices have a single bank */
 		if (size <= 0x80000U)
 			sam_add_flash(t, SAM4S_EEFC_BASE(0), 0x400000, size);
@@ -481,16 +483,16 @@ bool sam3x_probe(target_s *t)
 
 static bool sam_flash_cmd(target_s *t, uint32_t base, uint8_t cmd, uint16_t arg)
 {
-	DEBUG_INFO("%s: base = 0x%08" PRIx32 " cmd = 0x%02X, arg = 0x%06X\n", __func__, base, cmd, arg);
+	DEBUG_INFO("%s: base = 0x%08" PRIx32 " cmd = 0x%02X, arg = 0x%04X\n", __func__, base, cmd, arg);
 
 	if (base == 0)
 		return false;
 
-	target_mem_write32(t, EEFC_FCR(base), EEFC_FCR_FKEY | cmd | ((uint32_t)arg << 8U));
+	target_mem32_write32(t, EEFC_FCR(base), EEFC_FCR_FKEY | cmd | ((uint32_t)arg << 8U));
 
 	uint32_t status = 0;
 	while (!(status & EEFC_FSR_FRDY)) {
-		status = target_mem_read32(t, EEFC_FSR(base));
+		status = target_mem32_read32(t, EEFC_FSR(base));
 		if (target_check_error(t))
 			return false;
 	}
@@ -549,7 +551,7 @@ static bool sam_flash_write(target_flash_s *f, target_addr_t dest, const void *s
 	const uint32_t base = sf->eefc_base;
 	const uint32_t chunk = (dest - f->start) / f->writesize;
 
-	target_mem_write(t, dest, src, len);
+	target_mem32_write(t, dest, src, len);
 	return sam_flash_cmd(t, base, sf->write_cmd, chunk);
 }
 
@@ -558,7 +560,7 @@ static bool sam_gpnvm_get(target_s *t, uint32_t base, uint32_t *gpnvm)
 	if (!gpnvm || !sam_flash_cmd(t, base, EEFC_FCR_FCMD_GGPB, 0))
 		return false;
 
-	*gpnvm = target_mem_read32(t, EEFC_FRR(base));
+	*gpnvm = target_mem32_read32(t, EEFC_FRR(base));
 	return true;
 }
 
@@ -624,7 +626,7 @@ static bool sam_cmd_gpnvm(target_s *t, int argc, const char **argv)
 	uint32_t gpnvm = 0;
 	if (!sam_gpnvm_get(t, base, &gpnvm))
 		return false;
-	tc_printf(t, "GPNVM: 0x%08X\n", gpnvm);
+	tc_printf(t, "GPNVM: 0x%08" PRIX32 "\n", gpnvm);
 
 	if (drv == DRIVER_SAMX7X && (mask & GPNVM_SAMX7X_TCM_BIT_MASK)) {
 		sam_priv_s *storage = (sam_priv_s *)t->target_storage;

@@ -23,9 +23,10 @@
 #include <libopencm3/stm32/tools.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/usb/usbd.h>
+#include <libopencm3/usb/bos.h>
 #include <libopencm3/usb/dwc/otg_hs.h>
-#include "usb_private.h"
-#include "usb_dwc_common.h"
+#include "usb/usb_private.h"
+#include "usb/usb_dwc_common.h"
 
 /* Receive FIFO size in 32-bit words. */
 #define RX_FIFO_SIZE 512
@@ -187,7 +188,7 @@ static void stm32f723_ep_setup(usbd_device *usbd_dev, uint8_t addr, uint8_t type
 		OTG_HS_DIEPCTL0 |= OTG_DIEPCTL0_SNAK;
 
 		/* Configure OUT part. */
-		usbd_dev->doeptsiz[0] = OTG_DIEPSIZ0_STUPCNT_1 | OTG_DIEPSIZ0_PKTCNT | (max_size & OTG_DIEPSIZ0_XFRSIZ_MASK);
+		usbd_dev->doeptsiz[0] = OTG_DOEPSIZ0_STUPCNT_1 | OTG_DIEPSIZ0_PKTCNT | (max_size & OTG_DIEPSIZ0_XFRSIZ_MASK);
 		OTG_HS_DOEPTSIZ(0) = usbd_dev->doeptsiz[0];
 		OTG_HS_DOEPCTL(0) |= OTG_DOEPCTL0_EPENA | OTG_DIEPCTL0_SNAK;
 
@@ -207,7 +208,7 @@ static void stm32f723_ep_setup(usbd_device *usbd_dev, uint8_t addr, uint8_t type
 			OTG_DIEPCTL0_SNAK | (type << 18) | OTG_DIEPCTL0_USBAEP | OTG_DIEPCTLX_SD0PID | (addr << 22) | max_size;
 
 		if (callback)
-			usbd_dev->user_callback_ctr[addr][USB_TRANSACTION_IN] = (void *)callback;
+			usbd_dev->user_callback_ctr[addr][USB_TRANSACTION_IN] = callback;
 	}
 
 	if (!dir) {
@@ -217,7 +218,7 @@ static void stm32f723_ep_setup(usbd_device *usbd_dev, uint8_t addr, uint8_t type
 			(type << 18) | max_size;
 
 		if (callback)
-			usbd_dev->user_callback_ctr[addr][USB_TRANSACTION_OUT] = (void *)callback;
+			usbd_dev->user_callback_ctr[addr][USB_TRANSACTION_OUT] = callback;
 	}
 }
 

@@ -8,8 +8,10 @@ used by (multiple) platforms.
 * native: Firmware for [Black Magic Probe](https://1bitsquared.com/products/black-magic-probe)
 * stlink: Firmware for ST-Link v2 and ST-Link v2.1
 * swlink:  Firmware for ST-Link v1 and Bluepill
-* blackpillv2: Firmware for the WeAct Blackpill v2
-* hydrabus:  Firmware for [hydrabus](https://hydrabus.com/)
+* blackpill-f401cc: Firmware for the WeAct Studio [Black Pill F401CC](https://github.com/WeActStudio/WeActStudio.MiniSTM32F4x1)
+* blackpill-f401ce: Firmware for the WeAct Studio [Black Pill F401CE](https://github.com/WeActStudio/WeActStudio.MiniSTM32F4x1)
+* blackpill-f411ce: Firmware for the WeAct Studio [Black Pill F411CE](https://github.com/WeActStudio/WeActStudio.MiniSTM32F4x1)
+* hydrabus:  Firmware for [HydraBus](https://hydrabus.com/)
 * f4discovery: Firmware for STM32F407DISCO
 * f3: Firmware for the STM32F3
 * f072: Firmware for the STM32F072
@@ -20,10 +22,11 @@ used by (multiple) platforms.
   * ST-Link v2, v2.1, and v3
   * FTDI MPSSE probes
   * CMSIS-DAP probes and
-  * JLink probes
+  * J-Link probes
 
 ## Support directories
 
 * common: common platform support for all platforms except hosted (BMDA)
-* stm32: STM32 specific libopencm3 common platform support
-* tm4c: Tiva-C specific libopencm3 common platform support
+* common/blackpill-f4: blackpill-f4 specific common platform code
+* common/stm32: STM32 specific libopencm3 common platform support
+* common/tm4c: Tiva-C specific libopencm3 common platform support

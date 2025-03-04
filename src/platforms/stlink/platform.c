@@ -21,9 +21,11 @@
 /* This file implements the platform specific functions for the ST-Link implementation. */
 
 #include "general.h"
+#include "platform.h"
 #include "usb.h"
 #include "aux_serial.h"
 
+#include <libopencm3/cm3/vector.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/scs.h>
@@ -50,17 +52,43 @@ void platform_init(void)
 #ifdef BLUEPILL
 	led_idle_run = GPIO13;
 	nrst_pin = NRST_PIN_V1;
+#elif defined(STLINK_V2_ISOL)
+	led_idle_run = GPIO9;
+	nrst_pin = NRST_PIN_V2;
+	/* PB12 is SWDIO_IN */
+	gpio_set_mode(GPIOB, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO12);
+	/* PA4 is used to set SWDCLK floating when set to 1 */
+	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO4);
+	gpio_clear(GPIOA, GPIO4);
+	/* PA1 is used to set SWDIO floating and MUXED to SWDIO_IN when set to 1 */
+	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO1);
+#elif defined(STLINK_FORCE_CLONE)
+	led_idle_run = GPIO9;
+	nrst_pin = NRST_PIN_CLONE;
 #else
-	if (rev == 0) {
+	switch (rev) {
+	case 0:
 		led_idle_run = GPIO8;
 		nrst_pin = NRST_PIN_V1;
-	} else {
+		break;
+	case 0x101:
+		led_idle_run = GPIO9;
+		nrst_pin = NRST_PIN_CLONE;
+		break;
+	default:
 		led_idle_run = GPIO9;
 		nrst_pin = NRST_PIN_V2;
+		break;
 	}
 #endif
 	/* Setup GPIO ports */
+#ifdef STLINK_V2_ISOL
+	/* In case of ISOL variant, this pin is never set to high impedance */
+	gpio_set_mode(TMS_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TMS_PIN);
+#else
+	/* In all other variants, this pin is initialized as high impedance */
 	gpio_set_mode(TMS_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_INPUT_FLOAT, TMS_PIN);
+#endif
 	gpio_set_mode(TCK_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TCK_PIN);
 	gpio_set_mode(TDI_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TDI_PIN);
 
@@ -69,15 +97,14 @@ void platform_init(void)
 	gpio_set_mode(LED_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, led_idle_run);
 
 	/* Relocate interrupt vector table here */
-	extern uint32_t vector_table;
 	SCB_VTOR = (uintptr_t)&vector_table;
 
 	platform_timing_init();
-	if (rev > 1U) /* Reconnect USB */
+	if ((rev & 0xff) > 1U) /* Reconnect USB */
 		gpio_set(GPIOA, GPIO15);
 	blackmagic_usb_init();
 
-#ifdef SWIM_AS_UART
+#ifdef SWIM_NRST_AS_UART
 	gpio_primary_remap(AFIO_MAPR_SWJ_CFG_FULL_SWJ, AFIO_MAPR_USART1_REMAP);
 #endif
 
@@ -130,7 +157,7 @@ const char *platform_target_voltage(void)
 {
 	static char ret[6] = "0.00V";
 	const uint8_t channel = 0;
-	adc_set_regular_sequence(ADC1, 1, (uint8_t *)&channel);
+	adc_set_regular_sequence(ADC1, 1, &channel);
 	adc_start_conversion_direct(ADC1);
 	/* Wait for end of conversion. */
 	while (!adc_eoc(ADC1))
@@ -138,7 +165,7 @@ const char *platform_target_voltage(void)
 	uint32_t platform_adc_value = adc_read_regular(ADC1);
 
 	const uint8_t ref_channel = 17;
-	adc_set_regular_sequence(ADC1, 1, (uint8_t *)&ref_channel);
+	adc_set_regular_sequence(ADC1, 1, &ref_channel);
 	adc_start_conversion_direct(ADC1);
 	/* Wait for end of conversion. */
 	while (!adc_eoc(ADC1))
@@ -154,7 +181,31 @@ const char *platform_target_voltage(void)
 	return ret;
 }
 
-void platform_target_clk_output_enable(bool enable)
+void platform_target_clk_output_enable(const bool enable)
 {
 	(void)enable;
+}
+
+bool platform_spi_init(const spi_bus_e bus)
+{
+	(void)bus;
+	return false;
+}
+
+bool platform_spi_deinit(const spi_bus_e bus)
+{
+	(void)bus;
+	return false;
+}
+
+bool platform_spi_chip_select(const uint8_t device_select)
+{
+	(void)device_select;
+	return false;
+}
+
+uint8_t platform_spi_xfer(const spi_bus_e bus, const uint8_t value)
+{
+	(void)bus;
+	return value;
 }

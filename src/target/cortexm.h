@@ -22,6 +22,7 @@
 
 #include "target.h"
 #include "adiv5.h"
+#include "cortex.h"
 
 extern unsigned cortexm_wait_timeout;
 /* Private peripheral bus base address */
@@ -29,16 +30,18 @@ extern unsigned cortexm_wait_timeout;
 
 #define CORTEXM_SCS_BASE (CORTEXM_PPB_BASE + 0xe000U)
 
-#define CORTEXM_CPUID (CORTEXM_SCS_BASE + 0xd00U)
-#define CORTEXM_AIRCR (CORTEXM_SCS_BASE + 0xd0cU)
-#define CORTEXM_CFSR  (CORTEXM_SCS_BASE + 0xd28U)
-#define CORTEXM_HFSR  (CORTEXM_SCS_BASE + 0xd2cU)
-#define CORTEXM_DFSR  (CORTEXM_SCS_BASE + 0xd30U)
-#define CORTEXM_CPACR (CORTEXM_SCS_BASE + 0xd88U)
-#define CORTEXM_DHCSR (CORTEXM_SCS_BASE + 0xdf0U)
-#define CORTEXM_DCRSR (CORTEXM_SCS_BASE + 0xdf4U)
-#define CORTEXM_DCRDR (CORTEXM_SCS_BASE + 0xdf8U)
-#define CORTEXM_DEMCR (CORTEXM_SCS_BASE + 0xdfcU)
+#define CORTEXM_CPUID   (CORTEXM_SCS_BASE + 0xd00U)
+#define CORTEXM_AIRCR   (CORTEXM_SCS_BASE + 0xd0cU)
+#define CORTEXM_CCR     (CORTEXM_SCS_BASE + 0xd14U)
+#define CORTEXM_CFSR    (CORTEXM_SCS_BASE + 0xd28U)
+#define CORTEXM_HFSR    (CORTEXM_SCS_BASE + 0xd2cU)
+#define CORTEXM_DFSR    (CORTEXM_SCS_BASE + 0xd30U)
+#define CORTEXM_ID_PFR1 (CORTEXM_SCS_BASE + 0xd44U)
+#define CORTEXM_CPACR   (CORTEXM_SCS_BASE + 0xd88U)
+#define CORTEXM_DHCSR   (CORTEXM_SCS_BASE + 0xdf0U)
+#define CORTEXM_DCRSR   (CORTEXM_SCS_BASE + 0xdf4U)
+#define CORTEXM_DCRDR   (CORTEXM_SCS_BASE + 0xdf8U)
+#define CORTEXM_DEMCR   (CORTEXM_SCS_BASE + 0xdfcU)
 
 /* Cache identification */
 #define CORTEXM_CLIDR  (CORTEXM_SCS_BASE + 0xd78U)
@@ -47,9 +50,10 @@ extern unsigned cortexm_wait_timeout;
 #define CORTEXM_CSSELR (CORTEXM_SCS_BASE + 0xd84U)
 
 /* Cache maintenance operations */
-#define CORTEXM_ICIALLU  (CORTEXM_SCS_BASE + 0xf50U)
-#define CORTEXM_DCCMVAC  (CORTEXM_SCS_BASE + 0xf68U)
-#define CORTEXM_DCCIMVAC (CORTEXM_SCS_BASE + 0xf70U)
+#define CORTEXM_ICIALLU  (CORTEXM_SCS_BASE + 0xf50U) /* I-Cache Invalidate All to Point of Unification */
+#define CORTEXM_DCCMVAU  (CORTEXM_SCS_BASE + 0xf64U) /* D-Cache Clean by Address to Point of Unification */
+#define CORTEXM_DCCMVAC  (CORTEXM_SCS_BASE + 0xf68U) /* D-Cache Clean by Address to Point of Coherency */
+#define CORTEXM_DCCIMVAC (CORTEXM_SCS_BASE + 0xf70U) /* D-Cache Clean and Invalidate by Address to Point of Coherency */
 
 #define CORTEXM_FPB_BASE (CORTEXM_PPB_BASE + 0x2000U)
 
@@ -68,13 +72,17 @@ extern unsigned cortexm_wait_timeout;
 /* Application Interrupt and Reset Control Register (AIRCR) */
 #define CORTEXM_AIRCR_VECTKEY (0x05faU << 16U)
 /* Bits 31:16 - Read as VECTKETSTAT, 0xfa05 */
-#define CORTEXM_AIRCR_ENDIANESS (1U << 15U)
+#define CORTEXM_AIRCR_ENDIANNESS (1U << 15U)
 /* Bits 15:11 - Unused, reserved */
 #define CORTEXM_AIRCR_PRIGROUP (7U << 8U)
 /* Bits 7:3 - Unused, reserved */
 #define CORTEXM_AIRCR_SYSRESETREQ   (1U << 2U)
 #define CORTEXM_AIRCR_VECTCLRACTIVE (1U << 1U)
 #define CORTEXM_AIRCR_VECTRESET     (1U << 0U)
+
+/* Configuration and Control Register (CCR) */
+#define CORTEXM_CCR_DCACHE_ENABLE (1U << 16U)
+#define CORTEXM_CCR_ICACHE_ENABLE (1U << 17U)
 
 /* HardFault Status Register (HFSR) */
 #define CORTEXM_HFSR_DEBUGEVT (1U << 31U)
@@ -92,24 +100,32 @@ extern unsigned cortexm_wait_timeout;
 #define CORTEXM_DFSR_BKPT     (1U << 1U)
 #define CORTEXM_DFSR_HALTED   (1U << 0U)
 
+/* Processor Feature Register 1 (ID_PFR1) */
+#define CORTEXM_ID_PFR1_SECEXT_IMPL (1U << 4U)
+
 /* Debug Halting Control and Status Register (DHCSR) */
 /* This key must be written to bits 31:16 for write to take effect */
 #define CORTEXM_DHCSR_DBGKEY 0xa05f0000U
 /* Bits 31:26 - Reserved */
-#define CORTEXM_DHCSR_S_RESET_ST  (1U << 25U)
-#define CORTEXM_DHCSR_S_RETIRE_ST (1U << 24U)
-/* Bits 23:20 - Reserved */
-#define CORTEXM_DHCSR_S_LOCKUP (1U << 19U)
-#define CORTEXM_DHCSR_S_SLEEP  (1U << 18U)
-#define CORTEXM_DHCSR_S_HALT   (1U << 17U)
-#define CORTEXM_DHCSR_S_REGRDY (1U << 16U)
-/* Bits 15:6 - Reserved */
-#define CORTEXM_DHCSR_C_SNAPSTALL (1U << 5U) /* v7m only */
+#define CORTEXM_DHCSR_S_RESET_ST  (1U << 25U) /* 1 if at least one reset happened since last read */
+#define CORTEXM_DHCSR_S_RETIRE_ST (1U << 24U) /* 1 if at least one instruction completed since last read */
+#define CORTEXM_DHCSR_S_FPD       (1U << 23U) /* Floating Point Debuggable? (ARMv8-M+, 1 if false) */
+#define CORTEXM_DHCSR_S_SUIDE     (1U << 22U) /* Secure invasive halting enabled? (ARMv8-M+, requires SE + UDE) */
+#define CORTEXM_DHCSR_S_NSUIDE    (1U << 21U) /* Non-Secure invasive halting enabled? (ARMv8-M+, requires SE + UDE) */
+#define CORTEXM_DHCSR_S_SDE       (1U << 20U) /* Secure debug enabled? (ARMv8-M+, requires SE) */
+#define CORTEXM_DHCSR_S_LOCKUP    (1U << 19U) /* 1 if the CPU is in the loocked up state */
+#define CORTEXM_DHCSR_S_SLEEP     (1U << 18U) /* 1 if the CPU is in a sleeping state pending IRQ or Event */
+#define CORTEXM_DHCSR_S_HALT      (1U << 17U) /* 1 if the CPU is halted in debug state */
+#define CORTEXM_DHCSR_S_REGRDY    (1U << 16U) /* 1 if DCRSR is ready for further writes */
+/* Bits 15:7 - Reserved */
+#define CORTEXM_DHCSR_C_PMOV (1U << 6U) /* 1 if C_DEBUGEN and a PMU overflow occcurs (ARMv8-M+) */
+#define CORTEXM_DHCSR_C_SNAPSTALL \
+	(1U << 5U) /* 1 if debug state can be netered imprecisely by forcing load/store to be abandoned ARMv7-M+ */
 /* Bit 4 - Reserved */
-#define CORTEXM_DHCSR_C_MASKINTS (1U << 3U)
-#define CORTEXM_DHCSR_C_STEP     (1U << 2U)
-#define CORTEXM_DHCSR_C_HALT     (1U << 1U)
-#define CORTEXM_DHCSR_C_DEBUGEN  (1U << 0U)
+#define CORTEXM_DHCSR_C_MASKINTS (1U << 3U) /* 1 if all maskable interrupts are masked (disabled) by the debugger */
+#define CORTEXM_DHCSR_C_STEP     (1U << 2U) /* 1 if the CPU should step one instruction when next unhalted */
+#define CORTEXM_DHCSR_C_HALT     (1U << 1U) /* 1 if the CPU should halt and enter debug state */
+#define CORTEXM_DHCSR_C_DEBUGEN  (1U << 0U) /* 1 if debugging is enabled on the CPU */
 
 /* Debug Core Register Selector Register (DCRSR) */
 #define CORTEXM_DCRSR_REGWnR      0x00010000U
@@ -138,10 +154,12 @@ extern unsigned cortexm_wait_timeout;
 #define CORTEXM_DEMCR_VC_CORERESET (1U << 0U)
 
 /* Flash Patch and Breakpoint Control Register (FP_CTRL) */
-/* Bits 32:15 - Reserved */
-/* Bits 14:12 - NUM_CODE2 */ /* v7m only */
-/* Bits 11:8 - NUM_LIT */    /* v7m only */
-/* Bits 7:4 - NUM_CODE1 */
+#define CORTEXM_FPB_CTRL_REV_MASK  0xfU
+#define CORTEXM_FPB_CTRL_REV_SHIFT 28U
+/* Bits 28:15 - Reserved */
+#define CORTEXM_FPB_CTRL_NUM_CODE_H (0x7U << 12U)
+#define CORTEXM_FPB_CTRL_NUM_LIT    (0xfU << 8U)
+#define CORTEXM_FPB_CTRL_NUM_CODE_L (0xfU << 4U)
 /* Bits 3:2 - Unspecified */
 #define CORTEXM_FPB_CTRL_KEY    (1U << 1U)
 #define CORTEXM_FPB_CTRL_ENABLE (1U << 0U)
@@ -159,39 +177,24 @@ extern unsigned cortexm_wait_timeout;
 #define CORTEXM_DWT_FUNC_FUNC_READ      (5U << 0U)
 #define CORTEXM_DWT_FUNC_FUNC_WRITE     (6U << 0U)
 #define CORTEXM_DWT_FUNC_FUNC_ACCESS    (7U << 0U)
+/* Variant for DWTv2 */
+#define CORTEXM_DWTv2_FUNC_MATCH_READ         (6U << 0U)
+#define CORTEXM_DWTv2_FUNC_MATCH_WRITE        (5U << 0U)
+#define CORTEXM_DWTv2_FUNC_MATCH_ACCESS       (4U << 0U)
+#define CORTEXM_DWTv2_FUNC_ACTION_TRIGGER     (0U << 4U)
+#define CORTEXM_DWTv2_FUNC_ACTION_DEBUG_EVENT (1U << 4U)
+#define CORTEXM_DWTv2_FUNC_LEN_VALUE(len)     (((len) >> 1) << 10U)
 
-#define REG_SP      13U
-#define REG_LR      14U
-#define REG_PC      15U
-#define REG_XPSR    16U
-#define REG_MSP     17U
-#define REG_PSP     18U
-#define REG_SPECIAL 19U
+#define CORTEXM_XPSR_THUMB          (1U << 24U)
+#define CORTEXM_XPSR_EXCEPTION_MASK 0x0000001fU
 
-#define ARM_THUMB_BREAKPOINT 0xbe00U
-#define CORTEXM_XPSR_THUMB   (1U << 24U)
-
-#define CORTEXM_TOPT_INHIBIT_NRST (1U << 2U)
-
-#define CORTEX_M0  0xc200U
-#define CORTEX_M0P 0xc600U
-#define CORTEX_M3  0xc230U
-#define CORTEX_M4  0xc240U
-#define CORTEX_M7  0xc270U
-#define CORTEX_M23 0xd200U
-#define CORTEX_M33 0xd210U
-#define STAR_MC1   0x1320U
-
-#define CPUID_PARTNO_MASK   0xfff0U
-#define CPUID_REVISION_MASK 0x00f00000U
-#define CPUID_PATCH_MASK    0xfU
-
-adiv5_access_port_s *cortexm_ap(target_s *t);
-
-bool cortexm_attach(target_s *t);
-void cortexm_detach(target_s *t);
-void cortexm_halt_resume(target_s *t, bool step);
-bool cortexm_run_stub(target_s *t, uint32_t loadaddr, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3);
-int cortexm_mem_write_sized(target_s *t, target_addr_t dest, const void *src, size_t len, align_e align);
+bool cortexm_attach(target_s *target);
+void cortexm_detach(target_s *target);
+void cortexm_halt_resume(target_s *target, bool step);
+bool cortexm_run_stub(target_s *target, uint32_t loadaddr, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3);
+int cortexm_mem_write_aligned(target_s *target, target_addr_t dest, const void *src, size_t len, align_e align);
+uint32_t cortexm_demcr_read(const target_s *target);
+void cortexm_demcr_write(target_s *target, uint32_t demcr);
+bool target_is_cortexm(const target_s *target);
 
 #endif /* TARGET_CORTEXM_H */

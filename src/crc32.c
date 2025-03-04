@@ -100,91 +100,113 @@ static uint32_t crc32_calc(const uint32_t crc, const uint8_t data)
 	return (crc << 8U) ^ crc32_table[((crc >> 24U) ^ data) & 0xffU];
 }
 
-bool generic_crc32(target_s *const t, uint32_t *const crc_res, uint32_t base, size_t len)
+static bool generic_crc32(target_s *const target, uint32_t *const result, const uint32_t base, const size_t len)
 {
 	uint32_t crc = 0xffffffffU;
-#if PC_HOSTED == 1
+#if CONFIG_BMDA == 1
 	/*
 	 * Reading a 2 MByte on a H743 takes about 80 s@128, 28s @ 1k,
 	 * 22 s @ 4k and 21 s @ 64k
 	 */
-	uint8_t bytes[0x1000];
+	uint8_t bytes[4096U];
 #else
-	uint8_t bytes[128];
+	uint8_t bytes[128U];
 #endif
 
-#if defined(ENABLE_DEBUG)
-	const uint32_t start_time = platform_time_ms();
-#endif
 	uint32_t last_time = platform_time_ms();
-	while (len) {
+	for (size_t offset = 0; offset < len; offset += sizeof(bytes)) {
 		const uint32_t actual_time = platform_time_ms();
 		if (actual_time > last_time + 1000U) {
 			last_time = actual_time;
 			gdb_if_putchar(0, true);
 		}
-		const size_t read_len = MIN(sizeof(bytes), len);
-		if (target_mem_read(t, bytes, base, read_len)) {
-			DEBUG_WARN("generic_crc32 error around address 0x%08" PRIx32 "\n", base);
+		const size_t read_len = MIN(sizeof(bytes), len - offset);
+		if (target_mem32_read(target, bytes, base + offset, (read_len + 3U) & ~3U)) {
+			DEBUG_ERROR("%s: error around address 0x%08" PRIx32 "\n", __func__, (uint32_t)(base + offset));
 			return false;
 		}
 
 		for (size_t i = 0; i < read_len; i++)
 			crc = crc32_calc(crc, bytes[i]);
-
-		base += read_len;
-		len -= read_len;
 	}
-	DEBUG_WARN("%" PRIu32 " ms\n", platform_time_ms() - start_time);
-	*crc_res = crc;
+	*result = crc;
 	return true;
 }
+
 #else
 #include <libopencm3/stm32/crc.h>
+#include "buffer_utils.h"
 
-bool generic_crc32(target_s *const t, uint32_t *const crc_res, uint32_t base, size_t len)
+static bool stm32_crc32(target_s *const target, uint32_t *const result, const uint32_t base, const size_t len)
 {
-	uint8_t bytes[128];
+	uint8_t bytes[1024U]; /* ADIv5 MEM-AP AutoInc range */
 
 	CRC_CR |= CRC_CR_RESET;
 
 	uint32_t last_time = platform_time_ms();
-	while (len > 3U) {
+	const size_t adjusted_len = len & ~3U;
+	for (size_t offset = 0; offset < adjusted_len; offset += sizeof(bytes)) {
 		const uint32_t actual_time = platform_time_ms();
 		if (actual_time > last_time + 1000U) {
 			last_time = actual_time;
 			gdb_if_putchar(0, true);
 		}
-		const size_t read_len = MIN(sizeof(bytes), len) & ~3U;
-		if (target_mem_read(t, bytes, base, read_len)) {
-			DEBUG_WARN("generic_crc32 error around address 0x%08" PRIx32 "\n", base);
+		const size_t read_len = MIN(sizeof(bytes), adjusted_len - offset);
+		if (target_mem32_read(target, bytes, base + offset, read_len)) {
+			DEBUG_ERROR("%s: error around address 0x%08" PRIx32 "\n", __func__, (uint32_t)(base + offset));
 			return false;
 		}
 
 		for (size_t i = 0; i < read_len; i += 4U)
-			CRC_DR = __builtin_bswap32(*(uint32_t *)(bytes + i));
-
-		base += read_len;
-		len -= read_len;
+			CRC_DR = read_be4(bytes, i);
 	}
 
 	uint32_t crc = CRC_DR;
 
-	if (target_mem_read(t, bytes, base, len)) {
-		DEBUG_WARN("generic_crc32 error around address 0x%08" PRIx32 "\n", base);
-		return false;
-	}
-	uint8_t *data = bytes;
-	while (len--) {
-		crc ^= *data++ << 24U;
-		for (size_t i = 0; i < 8U; i++) {
-			if (crc & 0x80000000U)
-				crc = (crc << 1U) ^ 0x4c11db7U;
-			else
-				crc <<= 1U;
+	const size_t remainder = len - adjusted_len;
+	if (remainder) {
+		if (target_mem32_read(target, bytes, base + adjusted_len, remainder)) {
+			DEBUG_ERROR("%s: error around address 0x%08" PRIx32 "\n", __func__, (uint32_t)(base + adjusted_len));
+			return false;
+		}
+		for (size_t offset = 0; offset < remainder; ++offset) {
+			crc ^= bytes[offset] << 24U;
+			for (size_t i = 0; i < 8U; i++) {
+				if (crc & 0x80000000U)
+					crc = (crc << 1U) ^ 0x4c11db7U;
+				else
+					crc <<= 1U;
+			}
 		}
 	}
-	*crc_res = crc;
+	*result = crc;
 	return true;
 }
 #endif
+
+/* Shim to dispatch host-specific implementation (and keep the `__func__` meaningful) */
+bool bmd_crc32(target_s *const target, uint32_t *const result, const uint32_t base, const size_t len)
+{
+#ifndef DEBUG_INFO_IS_NOOP
+	const uint32_t start_time = platform_time_ms();
+#endif
+#if !defined(STM32F0) && !defined(STM32F1) && !defined(STM32F2) && !defined(STM32F3) && !defined(STM32F4) && \
+	!defined(STM32F7) && !defined(STM32L0) && !defined(STM32L1) && !defined(STM32G0) && !defined(STM32G4)
+	const bool status = generic_crc32(target, result, base, len);
+#else
+	const bool status = stm32_crc32(target, result, base, len);
+#endif
+#ifndef DEBUG_INFO_IS_NOOP
+	/* "generic_crc32: 08000110+75272 -> 1353ms, 54 KiB/s" */
+	/* "stm32_crc32: 08000110+75272 -> 237ms, 310 KiB/s" */
+	const uint32_t end_time = platform_time_ms();
+	const uint32_t time_elapsed = end_time - start_time;
+	DEBUG_INFO("%s: 0x%08" PRIx32 "+%" PRIu32 " -> %" PRIu32 "ms", __func__, base, (uint32_t)len, time_elapsed);
+	if (len >= 512U) {
+		const uint32_t speed = len * 1000U / time_elapsed / 1024U;
+		DEBUG_INFO(", %" PRIu32 " KiB/s", speed);
+	}
+	DEBUG_INFO("\n");
+#endif
+	return status;
+}

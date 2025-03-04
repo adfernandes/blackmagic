@@ -1,7 +1,7 @@
 /*
  * This file is part of the Black Magic Debug project.
  *
- * Copyright (C) 2022 1BitSquared <info@1bitsquared.com>
+ * Copyright (C) 2022-2024 1BitSquared <info@1bitsquared.com>
  * Written by Rachel Mant <git@dragonmux.network>
  * All rights reserved.
  *
@@ -35,8 +35,9 @@
 #define PLATFORMS_HOSTED_UTILS_H
 
 #include <stdbool.h>
-#include <stdint.h>
 #include <stddef.h>
+
+char *format_string(const char *format, ...) DEBUG_FORMAT_ATTR;
 
 bool begins_with(const char *str, size_t str_length, const char *value);
 bool ends_with(const char *str, size_t str_length, const char *value);
